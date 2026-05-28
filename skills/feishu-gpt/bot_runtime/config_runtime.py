@@ -23,12 +23,41 @@ FEISHU_CLI_AS = settings.feishu_cli_as
 FEISHU_CLI_TIMEOUT = settings.feishu_cli_timeout
 FEISHU_CLI_EXTRA_ARGS = [str(item) for item in settings.feishu_cli_extra_args if str(item).strip()]
 
+DOC_IMPORT_ENABLED = settings.doc_import_enabled
+DOC_IMPORT_DIR = settings.doc_import_dir
+DOC_IMPORT_POLL_SECONDS = settings.doc_import_poll_seconds
+DOC_IMPORT_STABLE_SECONDS = settings.doc_import_stable_seconds
+DOC_IMPORT_CLI_AS = settings.doc_import_cli_as
+DOC_IMPORT_FOLDER_TOKEN = settings.doc_import_folder_token
+DOC_IMPORT_WIKI_NODE = settings.doc_import_wiki_node
+DOC_IMPORT_WIKI_SPACE = settings.doc_import_wiki_space
+DOC_IMPORT_NOTIFY_CHAT_ID = settings.doc_import_notify_chat_id
+DOC_IMPORT_NOTIFY_OPEN_ID = settings.doc_import_notify_open_id
+
+AGENT_NOTIFY_ENABLED = settings.agent_notify_enabled
+AGENT_NOTIFY_DIR = settings.agent_notify_dir
+AGENT_NOTIFY_POLL_SECONDS = settings.agent_notify_poll_seconds
+AGENT_NOTIFY_STABLE_SECONDS = settings.agent_notify_stable_seconds
+AGENT_NOTIFY_CHAT_ID = settings.agent_notify_chat_id
+AGENT_NOTIFY_OPEN_ID = settings.agent_notify_open_id
+
+AGENT_RUNNER_ENABLED = settings.agent_runner_enabled
+AGENT_RUNNER_DEFAULT_CWD = settings.agent_runner_default_cwd
+AGENT_RUNNER_TIMEOUT_SECONDS = settings.agent_runner_timeout_seconds
+AGENT_RUNNER_MAX_CONCURRENT = settings.agent_runner_max_concurrent
+AGENT_RUNNER_CODEX_BIN = settings.agent_runner_codex_bin
+AGENT_RUNNER_CLAUDE_BIN = settings.agent_runner_claude_bin
+AGENT_RUNNER_CODEX_ARGS = [str(item) for item in settings.agent_runner_codex_args if str(item).strip()]
+AGENT_RUNNER_CLAUDE_ARGS = [str(item) for item in settings.agent_runner_claude_args if str(item).strip()]
+AGENT_RUNNER_ALLOWED_SENDERS = {str(item).strip() for item in settings.agent_runner_allowed_senders if str(item).strip()}
+
 MAX_IDS = 1000
 MAX_HISTORY = 10
 COMPRESS_AT = 8
 KEEP_RECENT = 4
 MSG_CHUNK_SIZE = 4000
-MAX_TOOL_STEPS = 12
+MAX_CONSECUTIVE_TOOL_REPEATS = 2
+TOOL_LOG_PREVIEW_CHARS = 2000
 HEARTBEAT_INTERVAL_SECONDS = 1800
 WS_RESTART_THRESHOLD = 2
 HEARTBEAT_RESTART_THRESHOLD = 3

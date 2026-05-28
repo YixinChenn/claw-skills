@@ -13,14 +13,22 @@ agent_system_path = None
 
 ws_client = None
 bot_runtime_thread = None
+bot_mention_logged = False
+bot_display_names: set[str] = set()
 
 heartbeat_lock = threading.Lock()
 ws_consecutive_failures = 0
 heartbeat_consecutive_failures = 0
 last_heartbeat_ok_at = 0.0
+last_response_model = ""
 
 tasks_lock = threading.Lock()
 scheduled_tasks: dict = {}
+
+agent_jobs_lock = threading.Lock()
+agent_jobs_loaded = False
+agent_jobs: dict = {}
+agent_job_processes: dict = {}
 
 id_lock = threading.Lock()
 processed_ids: set = set()
@@ -30,6 +38,7 @@ conversations: dict = {}
 chat_locks: dict = defaultdict(threading.Lock)
 pending_message_lock = threading.Lock()
 pending_messages: dict[str, threading.Event] = {}
+request_context = threading.local()
 
 
 def is_duplicate(msg_id: str) -> bool:

@@ -3,7 +3,20 @@ import os
 import shutil
 import subprocess
 
+from . import state
+from .agent_runner import (
+    cancel_agent_job,
+    create_agent_job as create_runner_job,
+    format_agent_job_detail,
+    format_agent_job_summary,
+    get_agent_job,
+    list_agent_jobs,
+    AGENT_RUNNER_DENIED_MESSAGE,
+    require_agent_runner_authorized,
+    tail_agent_job_log as tail_runner_job_log,
+)
 from .config_runtime import FEISHU_CLI_BIN, FEISHU_CLI_ENABLED, FEISHU_CLI_EXTRA_ARGS, FEISHU_CLI_TIMEOUT
+from .messaging import send_reply
 from .paths import get_agent_workspace
 from .scheduler import (
     create_scheduled_task,
@@ -21,6 +34,10 @@ def is_feishu_cli_enabled() -> bool:
 def resolve_feishu_cli_bin() -> str | None:
     if os.path.sep in FEISHU_CLI_BIN or (os.path.altsep and os.path.altsep in FEISHU_CLI_BIN):
         return FEISHU_CLI_BIN if os.path.exists(FEISHU_CLI_BIN) else None
+    if os.name == "nt":
+        cmd_path = shutil.which(FEISHU_CLI_BIN + ".cmd")
+        if cmd_path:
+            return cmd_path
     return shutil.which(FEISHU_CLI_BIN)
 
 
@@ -202,6 +219,10 @@ SHELL_TOOLS = [
     {"type": "function", "function": {"name": "run_shell", "description": "执行 PowerShell 命令。", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "integer"}}, "required": ["command"], "additionalProperties": False}}},
 ]
 
+FEISHU_CLI_TOOLS = [
+    {"type": "function", "function": {"name": "run_feishu_cli", "description": "执行 lark-cli/飞书 CLI。args 是 argv 参数数组，会直接传给 subprocess，不经过 PowerShell。普通 lark-cli 子命令优先用本工具；如果需要管道、重定向、命令串联、环境变量展开、PowerShell 变量、ConvertTo-Json 等 shell 语法，改用 run_shell。发送 JSON content 时传普通 JSON 字符串，例如 {\"text\":\"包含 \\\"引号\\\" 的文本\"}，不要写成 PowerShell 反斜杠转义形式。", "parameters": {"type": "object", "properties": {"args": {"type": "array", "items": {"type": "string"}}, "dry_run": {"type": "boolean"}}, "required": ["args"], "additionalProperties": False}}},
+]
+
 SCHEDULE_TOOLS = [
     {"type": "function", "function": {"name": "create_scheduled_task", "description": "创建 interval/daily/once 定时任务。必须使用稳定的 chat_id 或 open_id 作为投递目标，不要使用 message_id 或 thread_id。", "parameters": {"type": "object", "properties": {"schedule_type": {"type": "string"}, "interval_minutes": {"type": "integer"}, "time_of_day": {"type": "string"}, "run_at_text": {"type": "string"}, "prompt": {"type": "string"}, "chat_id": {"type": "string"}, "open_id": {"type": "string"}, "reply_id": {"type": "string"}, "workdays": {"type": "array", "items": {"type": "integer"}}, "work_time_start": {"type": "string"}, "work_time_end": {"type": "string"}}, "required": ["schedule_type", "prompt", "chat_id"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "list_scheduled_tasks", "description": "列出当前所有定时任务。", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}}},
@@ -209,6 +230,35 @@ SCHEDULE_TOOLS = [
     {"type": "function", "function": {"name": "set_scheduled_task_enabled", "description": "暂停或恢复定时任务。", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}, "enabled": {"type": "boolean"}}, "required": ["task_id", "enabled"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "set_scheduled_task_window", "description": "设置任务工作窗口。", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}, "workdays": {"type": "array", "items": {"type": "integer"}}, "work_time_start": {"type": "string"}, "work_time_end": {"type": "string"}}, "required": ["task_id"], "additionalProperties": False}}},
 ]
+
+AGENT_RUNNER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "start_agent_job",
+            "description": "启动或继续本机 Codex/Claude Code 后台任务。用户自然表达“让 Codex/Claude 做...”时优先使用本工具，不要用 run_shell 手写 CLI。若用户提供对话 ID、会话 ID、conversation_id、session_id 或要求继续某段对话，把该 ID 填入 conversation_id；若用户说继续最近一次会话，conversation_id 填 last。必须从消息元信息中取稳定 chat_id 作为 chat_id；reply_id 可传当前 reply_id 或 chat_id。任务结束后会自动回发完成状态和日志摘要。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "codex 或 claude"},
+                    "prompt": {"type": "string", "description": "交给 Codex/Claude Code 的完整任务说明"},
+                    "cwd": {"type": "string", "description": "运行目录；省略时使用 AGENT_RUNNER_DEFAULT_CWD，配置为空时使用当前 Agent 工作区"},
+                    "conversation_id": {"type": "string", "description": "可选：要继续的 Codex conversation id 或 Claude session id；last 表示最近一次"},
+                    "chat_id": {"type": "string", "description": "消息元信息中的 chat_id，用于任务完成后通知"},
+                    "reply_id": {"type": "string", "description": "当前回复目标；没有时传 chat_id"},
+                },
+                "required": ["agent", "prompt", "chat_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {"type": "function", "function": {"name": "list_agent_jobs", "description": "列出最近的 Codex/Claude Agent Job。", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": [], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "get_agent_job", "description": "查看指定 Agent Job 详情。", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "tail_agent_job", "description": "查看指定 Agent Job 最近日志。", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "line_count": {"type": "integer"}}, "required": ["job_id"], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "cancel_agent_job", "description": "取消指定 Agent Job。", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}}},
+]
+
+READ_ONLY_TOOL_NAMES = {"list_dir", "read_file"}
 
 
 def execute_workspace_tool(name: str, arguments: dict) -> str:
@@ -294,13 +344,62 @@ def execute_schedule_tool(name: str, arguments: dict) -> str:
     raise ValueError(f"未知定时任务工具: {name}")
 
 
-def get_all_tools() -> list:
-    return WORKSPACE_TOOLS + SHELL_TOOLS + SCHEDULE_TOOLS
+def execute_agent_runner_tool(name: str, arguments: dict) -> str:
+    if name == "start_agent_job":
+        context = getattr(state.request_context, "value", {}) or {}
+        try:
+            require_agent_runner_authorized(context.get("sender_ids"))
+        except PermissionError:
+            return json.dumps({"error": AGENT_RUNNER_DENIED_MESSAGE, "reply_text": AGENT_RUNNER_DENIED_MESSAGE}, ensure_ascii=False)
+        target = str(arguments.get("reply_id") or arguments.get("chat_id") or "").strip()
+        if not target:
+            raise ValueError("缺少 reply_id/chat_id，无法回发 Agent Job 状态")
+        job = create_runner_job(
+            arguments["agent"],
+            arguments["prompt"],
+            arguments.get("cwd"),
+            target,
+            arguments.get("chat_id"),
+            send_reply,
+            conversation_id=arguments.get("conversation_id"),
+        )
+        return json.dumps({"status": "started", "job": job, "summary": format_agent_job_detail(job)}, ensure_ascii=False)
+    if name == "list_agent_jobs":
+        jobs = list_agent_jobs(int(arguments.get("limit", 10) or 10))
+        return json.dumps({"jobs": jobs, "summary": "\n".join(format_agent_job_summary(job) for job in jobs)}, ensure_ascii=False)
+    if name == "get_agent_job":
+        job = get_agent_job(arguments["job_id"])
+        return json.dumps({"job": job, "summary": format_agent_job_detail(job)}, ensure_ascii=False)
+    if name == "tail_agent_job":
+        return json.dumps({"job_id": arguments["job_id"], "log": tail_runner_job_log(arguments["job_id"], int(arguments.get("line_count", 80) or 80))}, ensure_ascii=False)
+    if name == "cancel_agent_job":
+        context = getattr(state.request_context, "value", {}) or {}
+        try:
+            require_agent_runner_authorized(context.get("sender_ids"))
+        except PermissionError:
+            return json.dumps({"error": AGENT_RUNNER_DENIED_MESSAGE, "reply_text": AGENT_RUNNER_DENIED_MESSAGE}, ensure_ascii=False)
+        job = cancel_agent_job(arguments["job_id"])
+        return json.dumps({"status": "cancel_requested", "job": job, "summary": format_agent_job_detail(job)}, ensure_ascii=False)
+    raise ValueError(f"未知 Agent Runner 工具: {name}")
+
+
+def get_all_tools(tool_mode: str = "full") -> list:
+    mode = str(tool_mode or "full").strip().lower()
+    all_tools = WORKSPACE_TOOLS + SHELL_TOOLS + FEISHU_CLI_TOOLS + SCHEDULE_TOOLS + AGENT_RUNNER_TOOLS
+    if mode == "none":
+        return []
+    if mode == "read_only":
+        return [tool for tool in all_tools if tool["function"]["name"] in READ_ONLY_TOOL_NAMES]
+    return all_tools
 
 
 def execute_tool(name: str, arguments: dict) -> str:
     if name == "run_shell":
         return execute_shell_tool(arguments)
+    if name == "run_feishu_cli":
+        return run_feishu_cli(arguments["args"], bool(arguments.get("dry_run", False)))
     if name in {"create_scheduled_task", "list_scheduled_tasks", "delete_scheduled_task", "set_scheduled_task_enabled", "set_scheduled_task_window"}:
         return execute_schedule_tool(name, arguments)
+    if name in {"start_agent_job", "list_agent_jobs", "get_agent_job", "tail_agent_job", "cancel_agent_job"}:
+        return execute_agent_runner_tool(name, arguments)
     return execute_workspace_tool(name, arguments)

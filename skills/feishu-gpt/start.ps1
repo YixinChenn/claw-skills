@@ -3,7 +3,45 @@ param(
 )
 
 # 飞书 × ChatGPT 机器人 快速启动脚本
-$Host.UI.RawUI.WindowTitle = "飞书 × ChatGPT 机器人"
+$WindowTitle = "飞书 × ChatGPT 机器人"
+$Host.UI.RawUI.WindowTitle = $WindowTitle
+
+function Start-WindowTitleKeeper {
+    param([string]$Title)
+
+    $timer = New-Object System.Timers.Timer
+    $timer.Interval = 1000
+    $timer.AutoReset = $true
+    $handler = [System.Timers.ElapsedEventHandler]{
+        param($Sender, $EventArgs)
+        try {
+            [Console]::Title = $Title
+        } catch {
+        }
+    }
+    $timer.add_Elapsed($handler)
+    $timer.Start()
+    return @{ Timer = $timer; Handler = $handler }
+}
+
+function Stop-WindowTitleKeeper {
+    param($Keeper)
+
+    if (-not $Keeper) {
+        return
+    }
+    try {
+        $Keeper.Timer.Stop()
+        $Keeper.Timer.Dispose()
+    } catch {
+    }
+    try {
+        $Keeper.Timer.remove_Elapsed($Keeper.Handler)
+    } catch {
+    }
+}
+
+$windowTitleKeeper = Start-WindowTitleKeeper -Title $WindowTitle
 
 Write-Host "================================================" -ForegroundColor Cyan
 Write-Host "  飞书 × ChatGPT 机器人 启动中..." -ForegroundColor Cyan
@@ -79,9 +117,17 @@ Write-Host "================================================" -ForegroundColor C
 Write-Host ""
 
 if ($LocalChat) {
-    python $botPath --local-chat
+    try {
+        python $botPath --local-chat
+    } finally {
+        Stop-WindowTitleKeeper $windowTitleKeeper
+    }
 } else {
-    python $botPath
+    try {
+        python $botPath
+    } finally {
+        Stop-WindowTitleKeeper $windowTitleKeeper
+    }
 }
 
 Write-Host ""

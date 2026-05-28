@@ -1,4 +1,6 @@
+import base64
 import json
+import mimetypes
 import re
 
 from lark_oapi.api.im.v1 import (
@@ -9,6 +11,9 @@ from lark_oapi.api.im.v1 import (
     DeleteMessageReactionRequest,
     Emoji,
     GetMessageRequest,
+    GetMessageResourceRequest,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
 )
 
 from .config_runtime import MSG_CHUNK_SIZE, NOTIFY_CHAT_ID, NOTIFY_OPEN_ID, client
@@ -36,6 +41,26 @@ def _send(receive_id_type: str, receive_id: str, msg_type: str, content: str) ->
     if resp.success():
         return resp.data.message_id
     print(f"[ERROR] 发送失败({msg_type}): {resp.code} {resp.msg}")
+    return None
+
+
+def _reply(message_id: str, msg_type: str, content: str, reply_in_thread: bool = False) -> str | None:
+    request = (
+        ReplyMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(
+            ReplyMessageRequestBody.builder()
+            .msg_type(msg_type)
+            .content(content)
+            .reply_in_thread(reply_in_thread)
+            .build()
+        )
+        .build()
+    )
+    resp = client.im.v1.message.reply(request)
+    if resp.success():
+        return resp.data.message_id
+    print(f"[ERROR] 回复失败({msg_type}): {resp.code} {resp.msg}")
     return None
 
 
@@ -68,7 +93,7 @@ def remove_reaction(message_id: str, reaction_id: str):
         print(f"[WARN] 移除表情失败: {resp.code} {resp.msg}")
 
 
-def plain_text_content(text: str) -> str:
+def plain_text(text: str) -> str:
     plain = str(text or "").replace("\r\n", "\n")
     plain = re.sub(r"```[^\n]*\n", "", plain)
     plain = plain.replace("```", "")
@@ -77,8 +102,24 @@ def plain_text_content(text: str) -> str:
     plain = re.sub(r"__([^_]+)__", r"\1", plain)
     plain = re.sub(r"^#{1,6}\s*", "", plain, flags=re.MULTILINE)
     plain = re.sub(r"^\>\s?", "", plain, flags=re.MULTILINE)
-    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
-    return json_dumps({"text": plain})
+    return re.sub(r"\n{3,}", "\n\n", plain).strip()
+
+
+def plain_text_content(text: str) -> str:
+    return json_dumps({"text": plain_text(text)})
+
+
+def post_content_with_at(text: str, at_user_id: str | None = None, at_user_name: str = "发信人") -> str:
+    lines = plain_text(text).split("\n") or [""]
+    content = []
+    for index, line in enumerate(lines):
+        parts = []
+        if index == 0 and at_user_id:
+            parts.append({"tag": "at", "user_id": at_user_id, "user_name": at_user_name or "发信人"})
+            line = f" {line}" if line else " "
+        parts.append({"tag": "text", "text": line if line else " "})
+        content.append(parts)
+    return json_dumps({"zh_cn": {"title": "", "content": content}})
 
 
 def send_card(reply_id: str, text: str):
@@ -122,6 +163,25 @@ def send_reply(reply_id: str, text: str):
     for index, chunk in enumerate(chunks, start=1):
         content = chunk if total == 1 else f"**[{index}/{total}]**\n\n{chunk}"
         send_card(reply_id, content)
+
+
+def send_message_reply(
+    message_id: str,
+    text: str,
+    at_user_id: str | None = None,
+    at_user_name: str = "发信人",
+    reply_in_thread: bool = False,
+) -> bool:
+    chunks = split_message(text)
+    total = len(chunks)
+    ok = True
+    sent_count = 0
+    for index, chunk in enumerate(chunks, start=1):
+        content = chunk if total == 1 else f"**[{index}/{total}]**\n\n{chunk}"
+        sent_id = _reply(message_id, "post", post_content_with_at(content, at_user_id, at_user_name), reply_in_thread)
+        sent_count += 1 if sent_id else 0
+        ok = ok and bool(sent_id)
+    return ok or sent_count > 0
 
 
 def mention_display_name(mention) -> str:
@@ -254,8 +314,54 @@ def parse_message_content(message_type: str, content: str, mentions=None) -> tup
     if message_type == "text":
         text = (data.get("text") or "").strip()
         return restore_mentions_in_text(text, mentions), data
+    if message_type == "image":
+        return "[图片消息]", data
     label = message_type or "unknown"
     return f"[{label} 消息]", data
+
+
+def _guess_image_mime(file_name: str | None, content_type: str | None) -> str:
+    normalized = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized.startswith("image/"):
+        return normalized
+    guessed, _ = mimetypes.guess_type(file_name or "")
+    return guessed if guessed and guessed.startswith("image/") else "image/jpeg"
+
+
+def _image_bytes_to_data_url(image_bytes: bytes, file_name: str | None = None, content_type: str | None = None) -> str:
+    mime_type = _guess_image_mime(file_name, content_type)
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def fetch_message_image_data_urls(message_id: str, content_data: object) -> list[str]:
+    if not isinstance(content_data, dict):
+        return []
+    image_key = first_non_empty(content_data.get("image_key"), content_data.get("file_key"))
+    if not image_key:
+        return []
+
+    try:
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(image_key)
+            .type("image")
+            .build()
+        )
+        resp = client.im.v1.message_resource.get(request)
+        if not resp.success() or not getattr(resp, "file", None):
+            print(f"[WARN] 下载图片失败: {getattr(resp, 'code', '')} {getattr(resp, 'msg', '')}")
+            return []
+        image_bytes = resp.file.read()
+        if not image_bytes:
+            return []
+        headers = getattr(getattr(resp, "raw", None), "headers", {}) or {}
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        return [_image_bytes_to_data_url(image_bytes, getattr(resp, "file_name", None), content_type)]
+    except Exception as e:
+        print(f"[WARN] 下载图片异常: {e}")
+        return []
 
 
 def fetch_message_text(message_id: str) -> str | None:
