@@ -29,7 +29,15 @@ from .messaging import (
     send_message_reply,
     send_reply,
 )
-from .paths import build_agent_system_prompt, ensure_runtime_dirs, get_agent_workspace, get_agents_file_path, get_pid_file_path, get_tasks_file_path
+from .paths import (
+    build_agent_system_prompt,
+    configure_process_workspace,
+    ensure_runtime_dirs,
+    get_agent_workspace,
+    get_agents_file_path,
+    get_pid_file_path,
+    get_tasks_file_path,
+)
 from .scheduler import start_heartbeat_loop, start_task_scheduler
 from .utils import first_non_empty
 
@@ -120,6 +128,9 @@ def process_and_reply(
             reply = ask_chatgpt(prompt, build_agent_system_prompt(), cancel_event=cancel_event, image_data_urls=image_data_urls)
             if cancel_event.is_set():
                 print(f"[思考已中断] {sender_id}: {message_id}")
+                return
+            if not reply.strip():
+                print(f"[ChatGPT 空回复] {sender_id}: {message_id}")
                 return
             print(f"[ChatGPT 回复] {sender_id}: {reply[:80]}{'...' if len(reply) > 80 else ''}")
             update_history(chat_id, text, reply)
@@ -232,6 +243,7 @@ def remove_pid():
 
 
 def main():
+    configure_process_workspace()
     write_pid()
     atexit.register(remove_pid)
 
@@ -279,6 +291,7 @@ def _delayed_online_notify():
 
 
 def run_bot_and_local_chat():
+    configure_process_workspace()
     bot_thread = threading.Thread(target=main, daemon=True)
     state.bot_runtime_thread = bot_thread
     bot_thread.start()
@@ -286,6 +299,7 @@ def run_bot_and_local_chat():
 
 
 def run_local_chat():
+    configure_process_workspace()
     local_chat_id = "__local_chat__"
     print("=" * 50)
     print("  本地对话模式")
@@ -330,5 +344,8 @@ def run_local_chat():
 
         prompt = build_prompt(local_chat_id, user_text)
         reply = ask_chatgpt(prompt, build_agent_system_prompt())
+        if not reply.strip():
+            print("Agent> （无回复）\n")
+            continue
         update_history(local_chat_id, user_text, reply)
         print(f"Agent> {reply}\n")

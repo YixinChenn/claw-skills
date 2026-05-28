@@ -198,7 +198,7 @@ def ask_chatgpt(
             if not tool_calls:
                 output = (message.content or "").strip()
                 _log_tool_event(active_trace_id, "final_answer", {"output_preview": _preview_text(output or "（空响应）")})
-                return output or "（ChatGPT 没有返回内容）"
+                return output
 
             batch_signature = json.dumps([_make_tool_signature(tool_call) for tool_call in tool_calls], ensure_ascii=False)
             repeated_batch_count = repeated_batch_count + 1 if batch_signature == previous_batch_signature else 1

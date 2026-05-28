@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 from . import state
 from .config_runtime import AGENTS_PATH
@@ -27,6 +28,21 @@ def get_heartbeat_file_path() -> str:
 
 def get_runtime_data_dir() -> str:
     return os.path.join(get_agent_workspace(), "runtime_data")
+
+
+def get_tmp_dir() -> str:
+    return os.path.join(get_agent_workspace(), "tmp")
+
+
+def configure_process_workspace() -> tuple[str, str]:
+    workspace = get_agent_workspace()
+    tmp_dir = get_tmp_dir()
+    os.makedirs(tmp_dir, exist_ok=True)
+    os.chdir(workspace)
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        os.environ[name] = tmp_dir
+    tempfile.tempdir = tmp_dir
+    return workspace, tmp_dir
 
 
 def get_legacy_runtime_data_dir() -> str:
