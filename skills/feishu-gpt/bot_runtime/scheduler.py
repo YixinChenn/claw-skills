@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,53 @@ from .config_runtime import (
 )
 from .paths import ensure_runtime_dirs, get_legacy_tasks_file_path, get_tasks_file_path, load_heartbeat_text
 from .utils import format_timestamp_ms
+
+
+HEARTBEAT_REPLY_LEVELS = {
+    "HEARTBEAT_NOTICE": "notice",
+    "HEARTBEAT_NOTIFY": "notice",
+    "HEARTBEAT_INFO": "notice",
+    "HEARTBEAT_WARNING": "warning",
+    "HEARTBEAT_WARN": "warning",
+    "HEARTBEAT_ALERT": "alert",
+    "HEARTBEAT_ERROR": "alert",
+}
+
+HEARTBEAT_LEVEL_TITLES = {
+    "notice": "ℹ️ **HEARTBEAT 通知**",
+    "warning": "⚠️ **HEARTBEAT 提醒**",
+    "alert": "⚠️ **HEARTBEAT 告警**",
+}
+
+HEARTBEAT_REPLY_MARKER_RE = re.compile(
+    r"^`?(HEARTBEAT_(?:NOTICE|NOTIFY|INFO|WARNING|WARN|ALERT|ERROR))\b`?\s*(?:(?:[:：]|[-–—])\s*)?(.*)$",
+    re.IGNORECASE,
+)
+
+
+def parse_agent_heartbeat_reply(reply: str) -> tuple[str | None, str]:
+    text = str(reply or "").strip()
+    if not text or text == "HEARTBEAT_OK":
+        return None, ""
+
+    first_line, sep, rest = text.partition("\n")
+    match = HEARTBEAT_REPLY_MARKER_RE.match(first_line.strip())
+    if match:
+        level = HEARTBEAT_REPLY_LEVELS[match.group(1).upper()]
+        message_parts = []
+        inline_message = match.group(2).strip()
+        rest_message = rest.strip() if sep else ""
+        if inline_message:
+            message_parts.append(inline_message)
+        if rest_message:
+            message_parts.append(rest_message)
+        return level, "\n".join(message_parts).strip()
+    return "alert", text
+
+
+def format_heartbeat_notification(level: str, messages: list[str]) -> str:
+    title = HEARTBEAT_LEVEL_TITLES.get(level, HEARTBEAT_LEVEL_TITLES["alert"])
+    return title + "\n\n" + "\n\n".join(messages)
 
 
 def save_scheduled_tasks():
@@ -340,6 +388,8 @@ def perform_heartbeat_check(send_admin_notification, run_agent_heartbeat_check):
         return
     try:
         issues = []
+        notices = []
+        warnings = []
         restart_reason = None
 
         if state.bot_runtime_thread is None or not state.bot_runtime_thread.is_alive():
@@ -356,12 +406,28 @@ def perform_heartbeat_check(send_admin_notification, run_agent_heartbeat_check):
             state.ws_consecutive_failures = 0
 
         agent_reply = run_agent_heartbeat_check() or "HEARTBEAT_EMPTY"
-        if agent_reply != "HEARTBEAT_OK":
-            issues.append(agent_reply)
+        agent_level, agent_message = parse_agent_heartbeat_reply(agent_reply)
+        if agent_message:
+            if agent_level == "notice":
+                notices.append(agent_message)
+            elif agent_level == "warning":
+                warnings.append(agent_message)
+            else:
+                issues.append(agent_message)
+
+        if notices:
+            notify_text = format_heartbeat_notification("notice", notices)
+            send_admin_notification(notify_text)
+            print(f"[HEARTBEAT] 通知已发送: {notify_text[:120]}")
+
+        if warnings:
+            notify_text = format_heartbeat_notification("warning", warnings)
+            send_admin_notification(notify_text)
+            print(f"[HEARTBEAT] 提醒已发送: {notify_text[:120]}")
 
         if issues:
             state.heartbeat_consecutive_failures += 1
-            notify_text = "⚠️ **HEARTBEAT 告警**\n\n" + "\n\n".join(issues)
+            notify_text = format_heartbeat_notification("alert", issues)
             send_admin_notification(notify_text)
             print(f"[HEARTBEAT] 告警已发送: {notify_text[:120]}")
             if state.heartbeat_consecutive_failures >= HEARTBEAT_RESTART_THRESHOLD:
@@ -377,7 +443,10 @@ def perform_heartbeat_check(send_admin_notification, run_agent_heartbeat_check):
         else:
             state.heartbeat_consecutive_failures = 0
             state.last_heartbeat_ok_at = time.time()
-            print("[HEARTBEAT] HEARTBEAT_OK")
+            if notices or warnings:
+                print("[HEARTBEAT] HEARTBEAT_NOTIFICATION")
+            else:
+                print("[HEARTBEAT] HEARTBEAT_OK")
     except Exception as e:
         state.heartbeat_consecutive_failures += 1
         message = f"⚠️ **HEARTBEAT 执行失败**\n\n- {e}"

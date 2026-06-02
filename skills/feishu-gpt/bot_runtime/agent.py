@@ -381,7 +381,8 @@ def run_agent_heartbeat_check() -> str:
         "本轮 HEARTBEAT 开放工具；你可以在必要时读取、创建、修改工作区文件，执行必要的 shell / lark-cli 命令。\n"
         "你可以并应当在需要记录轮询状态时读取和更新 `memory/heartbeat-state.json`；如果该文件不存在，可在工作区下创建。\n"
         "如果 HEARTBEAT.md 为空、仅注释，或检查结果正常且无需通知，请只输出 `HEARTBEAT_OK`。\n"
-        "如果需要通知用户，请直接输出要发送给用户的正文，不要输出解释、前言、代码块或额外包装。"
+        "如果需要通知用户，请用固定首行声明信息级别：普通信息用 `HEARTBEAT_NOTICE`，潜在风险用 `HEARTBEAT_WARNING`，真实故障或需要人工处理的异常用 `HEARTBEAT_ALERT`。\n"
+        "从第二行开始输出要发送给用户的正文，不要输出解释、前言、代码块或额外包装。"
     )
     if heartbeat_text:
         prompt += "\n\n下面是 HEARTBEAT.md 当前内容，供你参考：\n" + heartbeat_text
