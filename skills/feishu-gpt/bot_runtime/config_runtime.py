@@ -31,6 +31,9 @@ DOC_IMPORT_CLI_AS = settings.doc_import_cli_as
 DOC_IMPORT_FOLDER_TOKEN = settings.doc_import_folder_token
 DOC_IMPORT_WIKI_NODE = settings.doc_import_wiki_node
 DOC_IMPORT_WIKI_SPACE = settings.doc_import_wiki_space
+DOC_IMPORT_LOCAL_INDEX_PATH = settings.doc_import_local_index_path
+DOC_IMPORT_ONLINE_INDEX_DOC = settings.doc_import_online_index_doc
+DOC_IMPORT_BOT_AUTHOR_ENABLED = settings.doc_import_bot_author_enabled
 DOC_IMPORT_NOTIFY_CHAT_ID = settings.doc_import_notify_chat_id
 DOC_IMPORT_NOTIFY_OPEN_ID = settings.doc_import_notify_open_id
 

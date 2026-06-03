@@ -21,10 +21,13 @@ class AppSettings:
     doc_import_dir: str = ""
     doc_import_poll_seconds: int = 10
     doc_import_stable_seconds: int = 5
-    doc_import_cli_as: str = "bot"
+    doc_import_cli_as: str = "user"
     doc_import_folder_token: str = ""
     doc_import_wiki_node: str = ""
     doc_import_wiki_space: str = ""
+    doc_import_local_index_path: str = "doc_sources/Document_Index.md"
+    doc_import_online_index_doc: str = ""
+    doc_import_bot_author_enabled: bool = True
     doc_import_notify_chat_id: str = ""
     doc_import_notify_open_id: str = ""
     agent_notify_enabled: bool = True

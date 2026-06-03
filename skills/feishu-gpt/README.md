@@ -82,10 +82,13 @@ FEISHU_CLI_EXTRA_ARGS   = []
 
 DOC_IMPORT_ENABLED      = False
 DOC_IMPORT_DIR          = ""                  # Markdown 投递目录，默认 <AGENTS_PATH>/doc_inbox
-DOC_IMPORT_CLI_AS       = "bot"               # docs +create 使用的身份：bot 或 user
+DOC_IMPORT_CLI_AS       = "user"              # docs +create/+update 使用的身份：bot 或 user
 DOC_IMPORT_FOLDER_TOKEN = ""                  # 可选：创建到指定云空间文件夹
 DOC_IMPORT_WIKI_NODE    = ""                  # 可选：创建到指定知识库节点
 DOC_IMPORT_WIKI_SPACE   = ""                  # 可选：创建到指定知识空间
+DOC_IMPORT_LOCAL_INDEX_PATH = "doc_sources/Document_Index.md"  # 本地文档索引，相对 AGENTS_PATH
+DOC_IMPORT_ONLINE_INDEX_DOC = ""              # 可选：在线文档索引 URL/token
+DOC_IMPORT_BOT_AUTHOR_ENABLED = True          # 新建时由机器人创建并填充正文，再转移所有权给用户
 
 AGENT_NOTIFY_ENABLED    = True                # 是否启用本地 Agent 通知投递
 AGENT_NOTIFY_DIR        = ""                  # 通知投递目录，默认 <AGENTS_PATH>/runtime_data/agent_notify
@@ -117,9 +120,12 @@ AGENT_RUNNER_ALLOWED_SENDERS = []             # 允许启动/取消 Agent Job �
 
 - 将 `DOC_IMPORT_ENABLED` 设为 `True`
 - 将 `DOC_IMPORT_DIR` 设为另一个 Agent 的 Markdown 输出目录；不填则使用 `<AGENTS_PATH>/doc_inbox`
-- 默认使用 `DOC_IMPORT_CLI_AS = "bot"` 调用 `lark-cli docs +create --as bot`
+- 默认使用 `DOC_IMPORT_CLI_AS = "user"` 调用 `lark-cli docs +update --as user`
+- 启用 `DOC_IMPORT_BOT_AUTHOR_ENABLED` 时，新建文档会先用 bot 身份创建并填充正文，再转移所有权给当前 CLI 用户，并显式给机器人保留 `full_access`
 - 需要创建到指定位置时，填写 `DOC_IMPORT_FOLDER_TOKEN`、`DOC_IMPORT_WIKI_NODE` 或 `DOC_IMPORT_WIKI_SPACE` 其中一个
 - 同标题 Markdown 会复用已创建文档并执行覆盖更新，不会重复新建；标题索引保存在投递目录下的 `doc_index.json`
+- 每次创建/更新文档后会同步维护 `<AGENTS_PATH>/doc_sources/Document_Index.md`；配置 `DOC_IMPORT_ONLINE_INDEX_DOC` 后，还会覆盖同步到在线文档索引
+- 已有文档更新会继续尝试把 `APP_ID` 对应机器人加入协作者并用 bot 身份重写；如果该文档不是机器人创建，飞书作者列表可能无法补写机器人
 - 导入成功后源 `.md` 会移动到 `processed/`，失败会移动到 `failed/`
 - 通知目标优先使用 `DOC_IMPORT_NOTIFY_CHAT_ID` / `DOC_IMPORT_NOTIFY_OPEN_ID`，不填则复用 `NOTIFY_CHAT_ID` / `NOTIFY_OPEN_ID`
 
@@ -252,10 +258,13 @@ python bot.py --local-chat
 | `FEISHU_CLI_EXTRA_ARGS` | app_config/local.py | 空列表 | 默认附加参数 |
 | `DOC_IMPORT_ENABLED` | app_config/local.py | False | 是否启用 Markdown 自动导入飞书文档 |
 | `DOC_IMPORT_DIR` | app_config/local.py | 空 | Markdown 投递目录，空则使用 `<AGENTS_PATH>/doc_inbox` |
-| `DOC_IMPORT_CLI_AS` | app_config/local.py | bot | 创建文档时使用的 lark-cli 身份 |
+| `DOC_IMPORT_CLI_AS` | app_config/local.py | user | 创建/更新文档时使用的 lark-cli 身份 |
 | `DOC_IMPORT_FOLDER_TOKEN` | app_config/local.py | 空 | 可选：创建到指定云空间文件夹 |
 | `DOC_IMPORT_WIKI_NODE` | app_config/local.py | 空 | 可选：创建到指定知识库节点 |
 | `DOC_IMPORT_WIKI_SPACE` | app_config/local.py | 空 | 可选：创建到指定知识空间 |
+| `DOC_IMPORT_LOCAL_INDEX_PATH` | app_config/local.py | doc_sources/Document_Index.md | 本地文档索引路径，相对 AGENTS_PATH |
+| `DOC_IMPORT_ONLINE_INDEX_DOC` | app_config/local.py | 空 | 在线文档索引 URL 或 token |
+| `DOC_IMPORT_BOT_AUTHOR_ENABLED` | app_config/local.py | True | 新建时是否由机器人创建并填充正文，再转移所有权给用户；更新时是否尝试补机器人协作编辑 |
 | `DOC_IMPORT_NOTIFY_CHAT_ID` | app_config/local.py | 空 | 可选：导入结果通知会话 |
 | `DOC_IMPORT_NOTIFY_OPEN_ID` | app_config/local.py | 空 | 可选：导入结果通知用户 |
 | `AGENT_NOTIFY_ENABLED` | app_config/local.py | True | 是否启用本地 Agent 通知投递 |

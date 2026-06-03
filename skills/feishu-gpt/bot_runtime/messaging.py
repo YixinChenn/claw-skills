@@ -17,7 +17,7 @@ from lark_oapi.api.im.v1 import (
 )
 
 from .config_runtime import MSG_CHUNK_SIZE, NOTIFY_CHAT_ID, NOTIFY_OPEN_ID, client
-from .utils import compact_dict, first_non_empty, format_timestamp_ms, json_dumps, serialize_sdk_value
+from .utils import compact_dict, first_non_empty, format_timestamp_ms, json_dumps
 
 
 def get_receive_id_type(reply_id: str) -> str:
@@ -251,7 +251,6 @@ def build_mentions_meta(mentions) -> list[dict]:
                     "union_id": first_non_empty(getattr(mention_id, "union_id", None), getattr(mention, "union_id", None)),
                     "tenant_key": first_non_empty(getattr(mention, "tenant_key", None)),
                     "fallback_id": mention_identifier(mention),
-                    "raw": serialize_sdk_value(mention),
                 }
             )
         )
@@ -267,9 +266,22 @@ def resolve_sender_identity(sender) -> dict:
             "sender_union_id": first_non_empty(getattr(sender_id, "union_id", None)),
             "sender_type": first_non_empty(getattr(sender, "sender_type", None)),
             "tenant_key": first_non_empty(getattr(sender, "tenant_key", None)),
-            "sender_raw": serialize_sdk_value(sender),
         }
     )
+
+
+def summarize_content_data(content_data) -> dict:
+    if not isinstance(content_data, dict):
+        return {}
+    keys = [
+        "image_key",
+        "file_key",
+        "file_name",
+        "file_size",
+        "mime_type",
+        "content_type",
+    ]
+    return compact_dict({key: content_data.get(key) for key in keys})
 
 
 def build_message_meta(msg, sender=None, mentions=None, content_data=None) -> dict:
@@ -284,9 +296,7 @@ def build_message_meta(msg, sender=None, mentions=None, content_data=None) -> di
             "message_type": first_non_empty(getattr(msg, "message_type", None), getattr(msg, "msg_type", None)),
             "create_time": format_timestamp_ms(getattr(msg, "create_time", None)),
             "update_time": format_timestamp_ms(getattr(msg, "update_time", None)),
-            "user_agent": first_non_empty(getattr(msg, "user_agent", None)),
-            "content_raw": content_data,
-            "message_raw": serialize_sdk_value(msg),
+            "content": summarize_content_data(content_data),
         }
     )
     if sender is not None:
