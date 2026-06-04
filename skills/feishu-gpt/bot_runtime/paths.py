@@ -122,7 +122,7 @@ def build_document_generation_prompt() -> str:
     local_index = str(DOC_IMPORT_LOCAL_INDEX_PATH or "").strip() or "doc_sources/Document_Index.md"
     online_index = str(DOC_IMPORT_ONLINE_INDEX_DOC or "").strip()
     online_target = online_index or "配置项 DOC_IMPORT_ONLINE_INDEX_DOC 指定的在线文档索引"
-    bot_author = "新建时先由机器人创建并填充正文，再把所有权转给用户，并显式给机器人保留 full_access；更新已有文档时尽量让机器人参与协作编辑；" if DOC_IMPORT_BOT_AUTHOR_ENABLED else ""
+    bot_author = "新建时先由机器人创建并填充正文，再把所有权转给用户，然后由 AI 继续迁移到用户个人空间，并显式给机器人保留 full_access；更新已有文档时尽量让机器人参与协作编辑；" if DOC_IMPORT_BOT_AUTHOR_ENABLED else ""
     cli_as = str(DOC_IMPORT_CLI_AS or "").strip() or "user"
     return (
         "文档生成约定：需要创建、更新或删除飞书文档时，"
@@ -131,6 +131,7 @@ def build_document_generation_prompt() -> str:
         "当用户要求你生成新飞书文档时，不要要求用户先创建空白占位文档；必须自己调用 run_feishu_cli 执行："
         "`docs +create --as bot --title <标题> --markdown @正文文件` 创建并填充正文，"
         "再用 `drive permission.members transfer_owner --as bot` 把所有权转给当前 CLI 用户，"
+        "再由 AI 自己继续判断并调用 `drive +move --as user` 迁移到当前 CLI 用户的个人空间，"
         "最后用 `drive permission.members create --as user` 给 APP_ID 机器人 full_access；"
         f"每次文档增删改后都要更新工作区内的 `{local_index}`；"
         "删除索引项时必须同步删除 `doc_inbox/doc_index.json` 中对应记录，不能用问号、空标题或占位标题代替删除；"

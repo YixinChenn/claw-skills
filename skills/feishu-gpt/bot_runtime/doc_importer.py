@@ -668,6 +668,7 @@ def create_lark_doc_from_markdown(path: str) -> dict:
         user_open_id = _find_value(stdout_data, {"user_open_id"})
         result["bot_author"] = "created_as_bot"
         result["owner_transfer"] = _transfer_owner_to_user(result, user_open_id)
+        result["personal_space_move"] = "pending_ai_migration"
         result["bot_permission"] = _grant_bot_full_access(result, "user")
     else:
         result["bot_author"] = "disabled"
@@ -745,7 +746,15 @@ def process_markdown_file(path: str):
         result = import_lark_doc_from_markdown(path)
         url_text = result.get("doc_url") or result.get("doc_id") or "未解析到文档链接，请查看日志"
         action_text = "已更新" if result.get("action") == "updated" else "已导入"
-        _notify(f"✅ **Markdown {action_text}飞书文档**\n\n- 标题：{result['title']}\n- 链接：{url_text}")
+        lines = [
+            f"✅ **Markdown {action_text}飞书文档**",
+            "",
+            f"- 标题：{result['title']}",
+            f"- 链接：{url_text}",
+        ]
+        if result.get("personal_space_move") == "pending_ai_migration":
+            lines.append("- 个人空间迁移：待 AI 继续执行")
+        _notify("\n".join(lines))
         archived = _archive_path(root, "processed", path)
         shutil.move(path, archived)
         with open(archived + ".json", "w", encoding="utf-8", newline="\n") as f:

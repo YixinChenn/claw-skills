@@ -88,7 +88,7 @@ DOC_IMPORT_WIKI_NODE    = ""                  # 可选：创建到指定知识�
 DOC_IMPORT_WIKI_SPACE   = ""                  # 可选：创建到指定知识空间
 DOC_IMPORT_LOCAL_INDEX_PATH = "doc_sources/Document_Index.md"  # 本地文档索引，相对 AGENTS_PATH
 DOC_IMPORT_ONLINE_INDEX_DOC = ""              # 可选：在线文档索引 URL/token
-DOC_IMPORT_BOT_AUTHOR_ENABLED = True          # 新建时由机器人创建并填充正文，再转移所有权给用户
+DOC_IMPORT_BOT_AUTHOR_ENABLED = True          # 新建时由机器人创建并填充正文，再转移所有权给用户；迁移到个人空间交给 AI 流程执行
 
 AGENT_NOTIFY_ENABLED    = True                # 是否启用本地 Agent 通知投递
 AGENT_NOTIFY_DIR        = ""                  # 通知投递目录，默认 <AGENTS_PATH>/runtime_data/agent_notify
@@ -121,7 +121,7 @@ AGENT_RUNNER_ALLOWED_SENDERS = []             # 允许启动/取消 Agent Job �
 - 将 `DOC_IMPORT_ENABLED` 设为 `True`
 - 将 `DOC_IMPORT_DIR` 设为另一个 Agent 的 Markdown 输出目录；不填则使用 `<AGENTS_PATH>/doc_inbox`
 - 默认使用 `DOC_IMPORT_CLI_AS = "user"` 调用 `lark-cli docs +update --as user`
-- 启用 `DOC_IMPORT_BOT_AUTHOR_ENABLED` 时，新建文档会先用 bot 身份创建并填充正文，再转移所有权给当前 CLI 用户，并显式给机器人保留 `full_access`
+- 启用 `DOC_IMPORT_BOT_AUTHOR_ENABLED` 时，新建文档会先用 bot 身份创建并填充正文，再转移所有权给当前 CLI 用户；迁移到用户个人空间这一步交给 AI 流程继续执行，不由后台导入器直接调用；最后显式给机器人保留 `full_access`
 - 需要创建到指定位置时，填写 `DOC_IMPORT_FOLDER_TOKEN`、`DOC_IMPORT_WIKI_NODE` 或 `DOC_IMPORT_WIKI_SPACE` 其中一个
 - 同标题 Markdown 会复用已创建文档并执行覆盖更新，不会重复新建；标题索引保存在投递目录下的 `doc_index.json`
 - 每次创建/更新文档后会同步维护 `<AGENTS_PATH>/doc_sources/Document_Index.md`；配置 `DOC_IMPORT_ONLINE_INDEX_DOC` 后，还会覆盖同步到在线文档索引
