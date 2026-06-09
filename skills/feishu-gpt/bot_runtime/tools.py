@@ -83,6 +83,7 @@ def run_feishu_cli(args: list[str], dry_run: bool = False) -> str:
     normalized_args = _normalize_cli_args(args)
     env = os.environ.copy()
     env["NO_COLOR"] = "1"
+    env.setdefault("GOMAXPROCS", "2")
 
     def _run(extra_args: list[str]):
         command = [resolve_feishu_cli_bin() or FEISHU_CLI_BIN]

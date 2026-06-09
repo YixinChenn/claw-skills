@@ -15,7 +15,7 @@ from .config_runtime import (
     TASK_POLL_INTERVAL_SECONDS,
     WS_RESTART_THRESHOLD,
 )
-from .paths import ensure_runtime_dirs, get_legacy_tasks_file_path, get_tasks_file_path, load_heartbeat_text
+from .paths import ensure_runtime_dirs, get_legacy_tasks_file_path, get_runtime_data_dir, get_tasks_file_path, load_heartbeat_text
 from .utils import format_timestamp_ms
 
 
@@ -39,6 +39,8 @@ HEARTBEAT_REPLY_MARKER_RE = re.compile(
     r"^`?(HEARTBEAT_(?:NOTICE|NOTIFY|INFO|WARNING|WARN|ALERT|ERROR))\b`?\s*(?:(?:[:：]|[-–—])\s*)?(.*)$",
     re.IGNORECASE,
 )
+HEARTBEAT_NOTIFICATION_MAX_CHARS = 1800
+HEARTBEAT_NOTIFICATION_SUMMARY_CHARS = 360
 
 
 def parse_agent_heartbeat_reply(reply: str) -> tuple[str | None, str]:
@@ -64,6 +66,48 @@ def parse_agent_heartbeat_reply(reply: str) -> tuple[str | None, str]:
 def format_heartbeat_notification(level: str, messages: list[str]) -> str:
     title = HEARTBEAT_LEVEL_TITLES.get(level, HEARTBEAT_LEVEL_TITLES["alert"])
     return title + "\n\n" + "\n\n".join(messages)
+
+
+def _limit_heartbeat_text(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"...（已截断，原始长度 {len(value)} 字符）"
+
+
+def _write_heartbeat_notification_log(level: str, text: str) -> str | None:
+    try:
+        log_dir = os.path.join(get_runtime_data_dir(), "heartbeat_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_level = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(level or "unknown")).strip("._") or "unknown"
+        path = os.path.join(log_dir, f"{stamp}_{safe_level}.log")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(str(text or "").rstrip() + "\n")
+        return path
+    except Exception as exc:
+        print(f"[HEARTBEAT] 写入长通知日志失败: {exc}")
+        return None
+
+
+def _prepare_heartbeat_notification(level: str, text: str) -> str:
+    if len(str(text or "")) <= HEARTBEAT_NOTIFICATION_MAX_CHARS:
+        return text
+    log_path = _write_heartbeat_notification_log(level, text)
+    title = HEARTBEAT_LEVEL_TITLES.get(level, HEARTBEAT_LEVEL_TITLES["alert"])
+    summary = _limit_heartbeat_text(text, HEARTBEAT_NOTIFICATION_SUMMARY_CHARS)
+    if log_path:
+        return (
+            f"{title}\n\n"
+            "- HEARTBEAT 输出过长，完整内容已写入本地日志。\n"
+            f"- 日志：`{log_path}`\n"
+            f"- 摘要：{summary}"
+        )
+    return f"{title}\n\n- HEARTBEAT 输出过长，且写入本地日志失败。\n- 摘要：{summary}"
+
+
+def _send_heartbeat_notification(send_admin_notification, level: str, text: str):
+    send_admin_notification(_prepare_heartbeat_notification(level, text))
 
 
 def save_scheduled_tasks():
@@ -417,18 +461,18 @@ def perform_heartbeat_check(send_admin_notification, run_agent_heartbeat_check):
 
         if notices:
             notify_text = format_heartbeat_notification("notice", notices)
-            send_admin_notification(notify_text)
+            _send_heartbeat_notification(send_admin_notification, "notice", notify_text)
             print(f"[HEARTBEAT] 通知已发送: {notify_text[:120]}")
 
         if warnings:
             notify_text = format_heartbeat_notification("warning", warnings)
-            send_admin_notification(notify_text)
+            _send_heartbeat_notification(send_admin_notification, "warning", notify_text)
             print(f"[HEARTBEAT] 提醒已发送: {notify_text[:120]}")
 
         if issues:
             state.heartbeat_consecutive_failures += 1
             notify_text = format_heartbeat_notification("alert", issues)
-            send_admin_notification(notify_text)
+            _send_heartbeat_notification(send_admin_notification, "alert", notify_text)
             print(f"[HEARTBEAT] 告警已发送: {notify_text[:120]}")
             if state.heartbeat_consecutive_failures >= HEARTBEAT_RESTART_THRESHOLD:
                 restart_reason = restart_reason or f"heartbeat_failed_x{state.heartbeat_consecutive_failures}"
@@ -450,8 +494,8 @@ def perform_heartbeat_check(send_admin_notification, run_agent_heartbeat_check):
     except Exception as e:
         state.heartbeat_consecutive_failures += 1
         message = f"⚠️ **HEARTBEAT 执行失败**\n\n- {e}"
-        send_admin_notification(message)
-        print(f"[HEARTBEAT] 执行失败: {e}")
+        _send_heartbeat_notification(send_admin_notification, "alert", message)
+        print(f"[HEARTBEAT] 执行失败: {_limit_heartbeat_text(e, 500)}")
         if state.heartbeat_consecutive_failures >= HEARTBEAT_RESTART_THRESHOLD:
             restart_notice = (
                 "⚠️ **HEARTBEAT 自动恢复**\n\n"

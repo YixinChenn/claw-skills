@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import time
+from datetime import datetime
 
 from openai import APIError, APITimeoutError, AuthenticationError
 
@@ -14,7 +16,7 @@ from .config_runtime import (
     TOOL_LOG_PREVIEW_CHARS,
     openai_client,
 )
-from .paths import build_agent_system_prompt, ensure_runtime_dirs, get_tool_call_log_path, load_heartbeat_text
+from .paths import build_agent_system_prompt, ensure_runtime_dirs, get_agent_workspace, get_runtime_data_dir, get_tool_call_log_path, load_heartbeat_text
 from .tools import execute_tool, get_all_tools
 
 TOOL_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
@@ -27,6 +29,7 @@ MAX_SUMMARY_SOURCE_CHARS = 120_000
 MAX_IMAGE_DATA_URL_CHARS = 500_000
 MAX_IMAGE_DATA_URLS = 2
 MAX_TOOL_RESULT_CHARS = 60_000
+LARK_CLI_VERSION_RE = re.compile(r"\b(\d+\.\d+\.\d+)\b")
 NO_TOOL_KEYWORDS = (
     "不用工具",
     "不要用工具",
@@ -292,14 +295,44 @@ def _parse_tool_escalation(output: str, current_mode: str) -> str | None:
     return None
 
 
-def _allow_tool_escalation(prompt: str, requested_mode: str, allow_tools: bool) -> bool:
+def _is_tool_required_sentinel(output: str) -> bool:
+    text = (output or "").strip()
+    if not text:
+        return False
+    for line in text.splitlines()[:3]:
+        normalized = line.strip().strip("`").replace("：", ":").lower()
+        if normalized.startswith("tool_required"):
+            return True
+    return False
+
+
+def _format_tool_escalation_blocked(escalated_mode: str) -> str:
+    label = "完整工具权限" if escalated_mode == "full" else "只读工具权限"
+    return f"（需要{label}才能继续，但本轮工具权限被用户指令或调用配置限制，不能自动升级。）"
+
+
+def _allow_tool_escalation(
+    prompt: str,
+    requested_mode: str,
+    allow_tools: bool,
+    current_mode: str,
+    escalated_mode: str,
+    auto_escalation_depth: int = 0,
+) -> bool:
     if not allow_tools:
         return False
     mode = str(requested_mode or "auto").strip().lower()
-    if mode in {"none", "read_only", "full"}:
-        return False
     latest = _latest_user_request(prompt).lower()
     if any(keyword in latest for keyword in NO_TOOL_KEYWORDS):
+        return False
+    if mode in {"none", "read_only", "full"}:
+        if (
+            auto_escalation_depth > 0
+            and mode == current_mode == "read_only"
+            and escalated_mode == "full"
+            and not any(keyword in latest for keyword in READ_ONLY_INTENT_KEYWORDS)
+        ):
+            return True
         return False
     if any(keyword in latest for keyword in READ_ONLY_INTENT_KEYWORDS):
         return False
@@ -332,6 +365,134 @@ def _create_chat_completion(messages: list[dict], tools: list | None):
     response = openai_client.chat.completions.create(**kwargs)
     state.last_response_model = str(getattr(response, "model", "") or "")
     return response
+
+
+def _parse_lark_cli_version(text: str) -> str | None:
+    match = LARK_CLI_VERSION_RE.search(str(text or ""))
+    return match.group(1) if match else None
+
+
+def _cli_payload_output(payload: dict) -> str:
+    return "\n".join(part for part in [payload.get("stdout", ""), payload.get("stderr", "")] if part)
+
+
+def _write_heartbeat_cli_log(label: str, text: str) -> str | None:
+    if not text:
+        return None
+    try:
+        log_dir = os.path.join(get_runtime_data_dir(), "heartbeat_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("._") or "cli"
+        path = os.path.join(log_dir, f"{stamp}_{safe_label}.log")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text.rstrip() + "\n")
+        return path
+    except Exception as exc:
+        print(f"[HEARTBEAT] 写入 CLI 错误日志失败: {exc}")
+        return None
+
+
+def _run_feishu_cli_payload(args: list[str]) -> dict:
+    try:
+        payload = json.loads(execute_tool("run_feishu_cli", {"args": args}))
+        payload["ok"] = True
+        return payload
+    except Exception as exc:
+        message = str(exc)
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            payload = {"command": ["lark-cli", *args], "exit_code": None, "stdout": "", "stderr": message}
+        payload["ok"] = False
+        return payload
+
+
+def _load_heartbeat_state() -> dict:
+    path = os.path.join(get_agent_workspace(), "memory", "heartbeat-state.json")
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def _write_heartbeat_state(data: dict):
+    path = os.path.join(get_agent_workspace(), "memory", "heartbeat-state.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def _run_lark_cli_update_for_heartbeat() -> str:
+    state_data = _load_heartbeat_state()
+    lark_cli_state = state_data.get("larkCli")
+    if not isinstance(lark_cli_state, dict):
+        lark_cli_state = {}
+    last_checks = state_data.get("lastChecks")
+    if not isinstance(last_checks, dict):
+        last_checks = {}
+
+    previous_version = str(lark_cli_state.get("version") or "").strip() or None
+    now = datetime.now().astimezone()
+    update_payload = _run_feishu_cli_payload(["update"])
+    update_output = _cli_payload_output(update_payload)
+    if update_payload.get("exit_code") not in (0, None) or update_payload.get("ok") is False:
+        error_text = update_output or json.dumps(update_payload, ensure_ascii=False)
+        error_log_path = _write_heartbeat_cli_log("lark_cli_update_error", error_text)
+        error_summary = _limit_text(error_text, 360, "lark-cli update 错误")
+        lark_cli_state.update(
+            {
+                "packageName": "@larksuite/cli",
+                "version": previous_version,
+                "lastUpdateCheckAt": now.isoformat(),
+                "lastUpdateResult": "failed",
+                "lastError": error_summary,
+                "lastErrorLog": error_log_path,
+            }
+        )
+        last_checks["larkCliUpdate"] = int(now.timestamp())
+        state_data["larkCli"] = lark_cli_state
+        state_data["lastChecks"] = last_checks
+        _write_heartbeat_state(state_data)
+        log_note = f"\n- 详细日志：`{error_log_path}`" if error_log_path else ""
+        return f"HEARTBEAT_WARNING\nlark-cli update 执行失败，已记录到 heartbeat-state.json。{log_note}\n- 摘要：{error_summary}"
+
+    version_payload = _run_feishu_cli_payload(["--version"])
+    version_output = _cli_payload_output(version_payload)
+    current_version = _parse_lark_cli_version(version_output) or _parse_lark_cli_version(update_output) or previous_version
+
+    updated = bool(previous_version and current_version and previous_version != current_version)
+    if updated:
+        verify_payload = _run_feishu_cli_payload(["update"])
+        verify_output = _cli_payload_output(verify_payload)
+    else:
+        verify_output = update_output
+    lark_cli_state.update(
+        {
+            "previousVersion": previous_version or current_version,
+            "packageName": "@larksuite/cli",
+            "version": current_version,
+            "latestVersion": current_version,
+            "npmPackageVersion": current_version,
+            "lastUpdateCheckAt": now.isoformat(),
+            "lastSuccessfulCheckAt": now.isoformat(),
+            "lastUpdateResult": "updated" if updated else "already up to date",
+            "lastError": None,
+        }
+    )
+    last_checks["larkCliUpdate"] = int(now.timestamp())
+    state_data["larkCli"] = lark_cli_state
+    state_data["lastChecks"] = last_checks
+    _write_heartbeat_state(state_data)
+
+    if updated:
+        return f"HEARTBEAT_NOTICE\nlark-cli 已更新到 {current_version}，并已完成二次 `lark-cli update` 验证：{verify_output}"
+    return "HEARTBEAT_OK"
 
 
 def _build_user_content(prompt: str, image_data_urls: list[str] | None = None):
@@ -374,6 +535,7 @@ def ask_chatgpt(
     trace_id: str | None = None,
     allow_tools: bool = True,
     image_data_urls: list[str] | None = None,
+    auto_escalation_depth: int = 0,
 ) -> str:
     if not OPENAI_API_KEY:
         return "（未配置 OPENAI_API_KEY）"
@@ -413,7 +575,14 @@ def ask_chatgpt(
                 output = (message.content or "").strip()
                 _log_tool_event(active_trace_id, "final_answer", {"output_preview": _preview_text(output or "（空响应）")})
                 escalated_mode = _parse_tool_escalation(output, resolved_tool_mode)
-                if escalated_mode and _allow_tool_escalation(prompt, requested_tool_mode, allow_tools):
+                if escalated_mode and _allow_tool_escalation(
+                    prompt,
+                    requested_tool_mode,
+                    allow_tools,
+                    resolved_tool_mode,
+                    escalated_mode,
+                    auto_escalation_depth,
+                ):
                     _log_tool_event(
                         active_trace_id,
                         "tool_mode_escalated",
@@ -431,7 +600,20 @@ def ask_chatgpt(
                         trace_id=f"{active_trace_id}:tool_escalated",
                         allow_tools=allow_tools,
                         image_data_urls=image_data_urls,
+                        auto_escalation_depth=auto_escalation_depth + 1,
                     )
+                if escalated_mode and _is_tool_required_sentinel(output):
+                    blocked_output = _format_tool_escalation_blocked(escalated_mode)
+                    _log_tool_event(
+                        active_trace_id,
+                        "tool_mode_escalation_blocked",
+                        {
+                            "from_mode": resolved_tool_mode,
+                            "to_mode": escalated_mode,
+                            "reason_preview": _preview_text(output),
+                        },
+                    )
+                    return blocked_output
                 return output
 
             batch_signature = json.dumps([_make_tool_signature(tool_call) for tool_call in tool_calls], ensure_ascii=False)
@@ -610,6 +792,9 @@ def update_history(chat_id: str, user_text: str, assistant_reply: str):
 
 def run_agent_heartbeat_check() -> str:
     heartbeat_text = load_heartbeat_text()
+    if "lark-cli" in heartbeat_text and "更新" in heartbeat_text:
+        return _run_lark_cli_update_for_heartbeat()
+
     prompt = (
         "现在执行一次 HEARTBEAT 轮询。\n"
         "请严格根据当前工作区的 AGENTS.md 和 HEARTBEAT.md 执行自检。\n"
