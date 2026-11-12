@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import mimetypes
 import re
@@ -24,7 +25,7 @@ def get_receive_id_type(reply_id: str) -> str:
     return "thread_id" if reply_id.startswith("ot_") else "chat_id"
 
 
-def _send(receive_id_type: str, receive_id: str, msg_type: str, content: str) -> str | None:
+def _send(receive_id_type: str, receive_id: str, msg_type: str, content: str, uuid: str | None = None) -> str | None:
     request = (
         CreateMessageRequest.builder()
         .receive_id_type(receive_id_type)
@@ -33,6 +34,7 @@ def _send(receive_id_type: str, receive_id: str, msg_type: str, content: str) ->
             .receive_id(receive_id)
             .msg_type(msg_type)
             .content(content)
+            .uuid(uuid)
             .build()
         )
         .build()
@@ -44,7 +46,7 @@ def _send(receive_id_type: str, receive_id: str, msg_type: str, content: str) ->
     return None
 
 
-def _reply(message_id: str, msg_type: str, content: str, reply_in_thread: bool = False) -> str | None:
+def _reply(message_id: str, msg_type: str, content: str, reply_in_thread: bool = False, uuid: str | None = None) -> str | None:
     request = (
         ReplyMessageRequest.builder()
         .message_id(message_id)
@@ -53,6 +55,7 @@ def _reply(message_id: str, msg_type: str, content: str, reply_in_thread: bool =
             .msg_type(msg_type)
             .content(content)
             .reply_in_thread(reply_in_thread)
+            .uuid(uuid)
             .build()
         )
         .build()
@@ -65,12 +68,16 @@ def _reply(message_id: str, msg_type: str, content: str, reply_in_thread: bool =
 
 
 def add_thinking_reaction(message_id: str) -> str | None:
+    return add_message_reaction(message_id, "THINKING")
+
+
+def add_message_reaction(message_id: str, emoji_type: str) -> str | None:
     request = (
         CreateMessageReactionRequest.builder()
         .message_id(message_id)
         .request_body(
             CreateMessageReactionRequestBody.builder()
-            .reaction_type(Emoji.builder().emoji_type("THINKING").build())
+            .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
             .build()
         )
         .build()
@@ -82,15 +89,17 @@ def add_thinking_reaction(message_id: str) -> str | None:
     return None
 
 
-def remove_reaction(message_id: str, reaction_id: str):
+def remove_reaction(message_id: str, reaction_id: str) -> bool:
     if not reaction_id:
-        return
+        return True
     request = DeleteMessageReactionRequest.builder().message_id(message_id).reaction_id(reaction_id).build()
     resp = client.im.v1.message_reaction.delete(request)
     if not resp.success():
         if str(resp.code) == "231003":
-            return
+            return True
         print(f"[WARN] 移除表情失败: {resp.code} {resp.msg}")
+        return False
+    return True
 
 
 def plain_text(text: str) -> str:
@@ -127,11 +136,11 @@ def send_card(reply_id: str, text: str):
 
 
 def send_card_to_chat(chat_id: str, text: str):
-    _send("chat_id", chat_id, "text", plain_text_content(text))
+    return _send("chat_id", chat_id, "text", plain_text_content(text))
 
 
 def send_card_to_open_id(open_id: str, text: str):
-    _send("open_id", open_id, "text", plain_text_content(text))
+    return _send("open_id", open_id, "text", plain_text_content(text))
 
 
 def send_admin_notification(text: str):
@@ -182,6 +191,21 @@ def send_message_reply(
         sent_count += 1 if sent_id else 0
         ok = ok and bool(sent_id)
     return ok or sent_count > 0
+
+
+def send_topic_root(receive_id_type: str, receive_id: str, text: str, notification_key: str) -> str | None:
+    uuid = hashlib.sha256((notification_key + ":root").encode("utf-8")).hexdigest()[:32]
+    return _send(receive_id_type, receive_id, "text", plain_text_content(text), uuid=uuid)
+
+
+def send_topic_notification(message_id: str, text: str, notification_key: str) -> bool:
+    chunks = split_message(text)
+    for index, chunk in enumerate(chunks, start=1):
+        content = chunk if len(chunks) == 1 else f"[{index}/{len(chunks)}]\n\n{chunk}"
+        uuid = hashlib.sha256(f"{notification_key}:{index}".encode("utf-8")).hexdigest()[:32]
+        if not _reply(message_id, "text", plain_text_content(content), reply_in_thread=True, uuid=uuid):
+            return False
+    return True
 
 
 def mention_display_name(mention) -> str:
@@ -319,11 +343,61 @@ def render_user_message(text: str, meta: dict | None = None) -> str:
     return stripped or meta_block
 
 
+def _post_message_text(data, mentions=None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    post = data
+    if not isinstance(post.get("content"), list):
+        candidates = [data.get("zh_cn"), data.get("en_us"), *data.values()]
+        post = next((item for item in candidates if isinstance(item, dict) and isinstance(item.get("content"), list)), {})
+    lines = [post.get("title")] if isinstance(post.get("title"), str) and post["title"].strip() else []
+    for row in post.get("content", []):
+        if not isinstance(row, list):
+            continue
+        parts = []
+        for node in row:
+            if not isinstance(node, dict):
+                continue
+            tag = node.get("tag")
+            text = node.get("text") if isinstance(node.get("text"), str) else ""
+            if tag == "a":
+                href = node.get("href") if isinstance(node.get("href"), str) else ""
+                parts.append(f"{text} ({href})" if text and href and text != href else text or href)
+            elif tag == "at":
+                user_id = str(node.get("user_id") or "")
+                display = node.get("user_name") or ""
+                if not display:
+                    for mention in mentions or []:
+                        ids = getattr(mention, "id", None)
+                        values = [getattr(mention, "key", None), mention_identifier(mention)]
+                        values.extend(getattr(ids, key, None) for key in ("user_id", "open_id", "union_id"))
+                        if user_id and user_id in values:
+                            display = mention_display_name(mention)
+                            break
+                display = display or ("所有人" if user_id == "all" else user_id)
+                parts.append("@" + str(display).lstrip("@") if display else "@unknown")
+            elif tag == "img":
+                parts.append("[图片]")
+            elif tag == "media":
+                parts.append("[视频]")
+            elif tag == "emotion":
+                parts.append("[" + str(node.get("emoji_type") or "表情") + "]")
+            elif tag == "hr":
+                parts.append("\n---\n")
+            else:
+                # Text, Markdown and code blocks carry their body in text.
+                parts.append(text)
+        lines.append("".join(parts))
+    return restore_mentions_in_text("\n".join(lines).strip(), mentions)
+
+
 def parse_message_content(message_type: str, content: str, mentions=None) -> tuple[str, object]:
     data = json.loads(content)
     if message_type == "text":
         text = (data.get("text") or "").strip()
         return restore_mentions_in_text(text, mentions), data
+    if message_type == "post":
+        return _post_message_text(data, mentions) or "[富文本消息：无可提取正文]", data
     if message_type == "image":
         return "[图片消息]", data
     label = message_type or "unknown"

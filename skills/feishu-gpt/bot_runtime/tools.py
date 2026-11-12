@@ -15,7 +15,7 @@ from .agent_runner import (
     require_agent_runner_authorized,
     tail_agent_job_log as tail_runner_job_log,
 )
-from .config_runtime import FEISHU_CLI_BIN, FEISHU_CLI_ENABLED, FEISHU_CLI_EXTRA_ARGS, FEISHU_CLI_TIMEOUT
+from .skill_loader import read_skill
 from .messaging import send_reply
 from .paths import get_agent_workspace
 from .scheduler import (
@@ -25,99 +25,6 @@ from .scheduler import (
     set_task_enabled,
     update_task_window,
 )
-
-
-def is_feishu_cli_enabled() -> bool:
-    return FEISHU_CLI_ENABLED
-
-
-def resolve_feishu_cli_bin() -> str | None:
-    if os.path.sep in FEISHU_CLI_BIN or (os.path.altsep and os.path.altsep in FEISHU_CLI_BIN):
-        return FEISHU_CLI_BIN if os.path.exists(FEISHU_CLI_BIN) else None
-    if os.name == "nt":
-        cmd_path = shutil.which(FEISHU_CLI_BIN + ".cmd")
-        if cmd_path:
-            return cmd_path
-    return shutil.which(FEISHU_CLI_BIN)
-
-
-def ensure_feishu_cli_ready():
-    if not is_feishu_cli_enabled():
-        raise RuntimeError("飞书 CLI 未启用")
-    if not resolve_feishu_cli_bin():
-        raise RuntimeError(
-            f"未找到 lark-cli 可执行文件：{FEISHU_CLI_BIN}。"
-            "请先安装 Node.js，并执行 `npm install -g @larksuite/cli`。"
-        )
-
-
-def _normalize_cli_args(args) -> list[str]:
-    if not isinstance(args, list) or not args:
-        raise ValueError("args 必须是非空字符串数组")
-    normalized = []
-    for item in args:
-        text = str(item).strip()
-        if not text:
-            raise ValueError("args 中不能包含空字符串")
-        normalized.append(text)
-    return normalized
-
-
-def _without_unsupported_format_args(args: list[str]) -> list[str]:
-    cleaned = []
-    skip_next = False
-    for idx, item in enumerate(args):
-        if skip_next:
-            skip_next = False
-            continue
-        if item == "--format":
-            if idx + 1 < len(args) and str(args[idx + 1]).lower() == "json":
-                skip_next = True
-            continue
-        cleaned.append(item)
-    return cleaned
-
-
-def run_feishu_cli(args: list[str], dry_run: bool = False) -> str:
-    ensure_feishu_cli_ready()
-    normalized_args = _normalize_cli_args(args)
-    env = os.environ.copy()
-    env["NO_COLOR"] = "1"
-    env.setdefault("GOMAXPROCS", "2")
-
-    def _run(extra_args: list[str]):
-        command = [resolve_feishu_cli_bin() or FEISHU_CLI_BIN]
-        command.extend(extra_args)
-        command.extend(normalized_args)
-        if dry_run and "--dry-run" not in command:
-            command.append("--dry-run")
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=FEISHU_CLI_TIMEOUT,
-            env=env,
-        )
-        return proc, command
-
-    try:
-        proc, command = _run(FEISHU_CLI_EXTRA_ARGS)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"lark-cli 执行超时（>{FEISHU_CLI_TIMEOUT}s）")
-    combined_output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
-    if proc.returncode != 0 and "unknown flag: --format" in combined_output and "--format" in FEISHU_CLI_EXTRA_ARGS:
-        proc, command = _run(_without_unsupported_format_args(FEISHU_CLI_EXTRA_ARGS))
-    payload = {
-        "command": command,
-        "exit_code": proc.returncode,
-        "stdout": (proc.stdout or "").strip(),
-        "stderr": (proc.stderr or "").strip(),
-    }
-    if proc.returncode != 0:
-        raise RuntimeError(json.dumps(payload, ensure_ascii=False))
-    return json.dumps(payload, ensure_ascii=False)
 
 
 def resolve_workspace_path(path: str) -> str:
@@ -220,8 +127,8 @@ SHELL_TOOLS = [
     {"type": "function", "function": {"name": "run_shell", "description": "执行 PowerShell 命令。", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "integer"}}, "required": ["command"], "additionalProperties": False}}},
 ]
 
-FEISHU_CLI_TOOLS = [
-    {"type": "function", "function": {"name": "run_feishu_cli", "description": "执行 lark-cli/飞书 CLI。args 是 argv 参数数组，会直接传给 subprocess，不经过 PowerShell。普通 lark-cli 子命令优先用本工具；如果需要管道、重定向、命令串联、环境变量展开、PowerShell 变量、ConvertTo-Json 等 shell 语法，改用 run_shell。发送 JSON content 时传普通 JSON 字符串，例如 {\"text\":\"包含 \\\"引号\\\" 的文本\"}，不要写成 PowerShell 反斜杠转义形式。", "parameters": {"type": "object", "properties": {"args": {"type": "array", "items": {"type": "string"}}, "dry_run": {"type": "boolean"}}, "required": ["args"], "additionalProperties": False}}},
+SKILL_TOOLS = [
+    {"type": "function", "function": {"name": "read_skill", "description": "读取已发现技能的完整 SKILL.md 或参考文件。path 相对于该技能目录；先读 SKILL.md 再按需读参考文件。", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name"], "additionalProperties": False}}},
 ]
 
 SCHEDULE_TOOLS = [
@@ -259,7 +166,7 @@ AGENT_RUNNER_TOOLS = [
     {"type": "function", "function": {"name": "cancel_agent_job", "description": "取消指定 Agent Job。", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}}},
 ]
 
-READ_ONLY_TOOL_NAMES = {"list_dir", "read_file"}
+READ_ONLY_TOOL_NAMES = {"list_dir", "read_file", "read_skill"}
 
 
 def execute_workspace_tool(name: str, arguments: dict) -> str:
@@ -385,8 +292,10 @@ def execute_agent_runner_tool(name: str, arguments: dict) -> str:
 
 
 def get_all_tools(tool_mode: str = "full") -> list:
+    if getattr(state.request_context, "value", {}).get("customer"):
+        return []
     mode = str(tool_mode or "full").strip().lower()
-    all_tools = WORKSPACE_TOOLS + SHELL_TOOLS + FEISHU_CLI_TOOLS + SCHEDULE_TOOLS + AGENT_RUNNER_TOOLS
+    all_tools = WORKSPACE_TOOLS + SHELL_TOOLS + SKILL_TOOLS + SCHEDULE_TOOLS + AGENT_RUNNER_TOOLS
     if mode == "none":
         return []
     if mode == "read_only":
@@ -395,10 +304,12 @@ def get_all_tools(tool_mode: str = "full") -> list:
 
 
 def execute_tool(name: str, arguments: dict) -> str:
+    if getattr(state.request_context, "value", {}).get("customer"):
+        raise PermissionError("客服会话不能调用管理工具")
     if name == "run_shell":
         return execute_shell_tool(arguments)
-    if name == "run_feishu_cli":
-        return run_feishu_cli(arguments["args"], bool(arguments.get("dry_run", False)))
+    if name == "read_skill":
+        return read_skill(get_agent_workspace(), arguments["name"], arguments.get("path", "SKILL.md"))
     if name in {"create_scheduled_task", "list_scheduled_tasks", "delete_scheduled_task", "set_scheduled_task_enabled", "set_scheduled_task_window"}:
         return execute_schedule_tool(name, arguments)
     if name in {"start_agent_job", "list_agent_jobs", "get_agent_job", "tail_agent_job", "cancel_agent_job"}:

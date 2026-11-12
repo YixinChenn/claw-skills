@@ -13,11 +13,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Resolve-AgentConversationId([string]$CurrentValue, [string]$SourceValue) {
+    if (-not [string]::IsNullOrWhiteSpace($CurrentValue) -and $CurrentValue.Trim().ToLowerInvariant() -notin @("unknown", "last", "latest")) {
+        return $CurrentValue.Trim()
+    }
+
+    $envNames = @("AGENT_CONVERSATION_ID")
+    if ($SourceValue -match "(?i)codex") {
+        $envNames += @("CODEX_THREAD_ID", "CODEX_CONVERSATION_ID")
+    }
+    elseif ($SourceValue -match "(?i)claude") {
+        $envNames += "CLAUDE_SESSION_ID"
+    }
+    foreach ($envName in $envNames) {
+        $envValue = [Environment]::GetEnvironmentVariable($envName)
+        if (-not [string]::IsNullOrWhiteSpace($envValue) -and $envValue.Trim().ToLowerInvariant() -notin @("unknown", "last", "latest")) {
+            return $envValue.Trim()
+        }
+    }
+    # The newest local session may belong to another concurrent chat.
+    return ""
+}
+
 if ([string]::IsNullOrWhiteSpace($Dir)) {
     $Dir = Join-Path $PSScriptRoot "runtime_data\agent_notify"
 }
 
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+
+$ConversationId = Resolve-AgentConversationId $ConversationId $Source
 
 $payload = [ordered]@{
     title = $Title

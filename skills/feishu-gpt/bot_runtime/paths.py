@@ -9,6 +9,7 @@ from .config_runtime import (
     DOC_IMPORT_LOCAL_INDEX_PATH,
     DOC_IMPORT_ONLINE_INDEX_DOC,
 )
+from .skill_loader import build_workspace_skill_prompt, build_skill_catalog_prompt
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(BASE_DIR, "app_config")
@@ -126,26 +127,24 @@ def build_document_generation_prompt() -> str:
     cli_as = str(DOC_IMPORT_CLI_AS or "").strip() or "user"
     return (
         "文档生成约定：需要创建、更新或删除飞书文档时，"
-        f"更新已有文档默认使用用户身份（lark-cli `--as {cli_as}`）；"
+        f"更新已有文档默认身份为 {cli_as}；"
         f"{bot_author}"
-        "当用户要求你生成新飞书文档时，不要要求用户先创建空白占位文档；必须自己调用 run_feishu_cli 执行："
-        "`docs +create --as bot --title <标题> --markdown @正文文件` 创建并填充正文，"
-        "再用 `drive permission.members transfer_owner --as bot` 把所有权转给当前 CLI 用户，"
-        "再由 AI 自己继续判断并调用 `drive +move --as user` 迁移到当前 CLI 用户的个人空间，"
-        "最后用 `drive permission.members create --as user` 给 APP_ID 机器人 full_access；"
+        "创建或编辑正文先加载 lark-doc；所有权、权限和空间迁移先加载 lark-drive，知识库位置使用 lark-wiki。"
+        "用户要求生成新文档时应直接按技能创建并填充，不要要求用户提供空白占位文档。"
         f"每次文档增删改后都要更新工作区内的 `{local_index}`；"
         "删除索引项时必须同步删除 `doc_inbox/doc_index.json` 中对应记录，不能用问号、空标题或占位标题代替删除；"
         f"更新本地索引后同步覆盖在线索引：{online_target}。"
     )
 
 
-def build_agent_system_prompt() -> str:
-    return (
+def build_agent_system_prompt(skill_invocation_text: str | None = None) -> str:
+    workspace = get_agent_workspace()
+    base_prompt = (
         f"{load_agent_system_prompt()}\n\n"
-        f"当前 Agent 工作区：{get_agent_workspace()}\n"
+        f"当前 Agent 工作区：{workspace}\n"
         "如果初始化指令里提到文件名或相对路径，都相对于上述工作区。\n"
         "你具备工作区编辑工具。凡是需要读取、创建、修改、删除本地文件，必须调用工具实际执行，不能只在回复里声称已完成。\n"
-        "你具备 Shell 工具，可直接执行 PowerShell 命令；普通 lark-cli/飞书 CLI 子命令优先使用 run_feishu_cli 工具，只有需要管道、重定向、命令串联、环境变量展开、PowerShell 变量或 ConvertTo-Json 等 shell 语法时才使用 run_shell。\n"
+        "你具备通用 Shell 工具；飞书操作必须先读取相应 lark skill 及必要参考，再按技能指引执行。\n"
         "你具备定时任务工具；需要周期性执行任务时，直接创建或管理定时任务。\n"
         "你具备 Agent Runner 工具；当用户要求让本机 Codex 或 Claude Code 执行任务、查看状态、查看日志或取消任务时，优先使用 Agent Runner 工具，不要用 run_shell 手写 codex/claude 命令。\n"
         "工具预算严格受限：能直接回答就直接回答；非必要不要调用工具；不要重复读取同一路径、重复执行等价命令。\n"
@@ -156,3 +155,5 @@ def build_agent_system_prompt() -> str:
         "执行命令前先想清楚工作目录和副作用；涉及写操作时优先先查看现状，再执行实际命令。\n"
         f"{build_document_generation_prompt()}"
     )
+    skill_prompt = build_workspace_skill_prompt(workspace, skill_invocation_text)
+    return "\n\n".join(part for part in [base_prompt, build_skill_catalog_prompt(workspace), skill_prompt] if part)

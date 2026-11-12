@@ -1,11 +1,28 @@
-# 含密钥，不上传
+# 含密钥和本机设置，不上传
 app_config/local.py
+.env
+.env.*
+!.env.example
+.agents/
+.codex/
+.claude/
 
 # 运行时文件
 runtime_data/
 __pycache__/
 *.pyc
 *.pyo
+.doc_import_tmp/
+doc_inbox/
+doc_sources/
+memory/
+*.log
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 
 # 系统文件
 .DS_Store

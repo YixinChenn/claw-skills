@@ -27,12 +27,30 @@ from .scheduler import (
     set_task_enabled,
     update_task_window,
 )
+from .skill_loader import (
+    get_workspace_skills_dir,
+    list_workspace_skills,
+    parse_workspace_skill_invocation,
+    workspace_skill_exists,
+)
 
 COMMANDS = {
+    "/collect": "进入显式收集：/collect [处理要求]",
+    "/run": "统一处理收集材料：/run [补充要求]",
+    "/pending": "查看当前收集批次",
+    "/cancel": "取消收集并删除材料",
     "/help": "显示可用指令列表",
     "/clear": "清除当前会话的对话历史",
     "/history": "查看当前上下文保留轮数和工作区",
-    "/model": "查看配置模型和最近一次 API 响应模型",
+    "/model": "飞书会话模型：/model [gpt-6-astra|gpt-6.1-sol]",
+    "/mode": "飞书会话档位：/mode quick|balanced|deep",
+    "/effort": "飞书会话推理强度：/effort low|medium|high|xhigh|max",
+    "/models": "查看可选模型和推理强度",
+    "/status": "查看当前会话模型设置和上次主回答实际返回档位",
+    "/ask": "仅本轮覆盖：/ask --effort high [--model gpt-6-astra] -- 问题",
+    "/new": "归档当前飞书会话并恢复默认模型设置",
+    "/end": "结束当前飞书咨询",
+    "/skills": "查看工作区中可用的技能",
     "/toollog": "查看最近工具调用日志：/toollog [条数，默认 20，最大 100]",
     "/task-add": "创建定时任务：/task-add <分钟> <任务内容>",
     "/task-add-daily": "创建每日任务：/task-add-daily <HH:MM> <任务内容>",
@@ -196,6 +214,18 @@ def handle_command(chat_id: str, text: str, reply_id: str, sender_ids=None) -> b
 
     if cmd == "/model":
         send_card(reply_id, format_model_status())
+        return True
+
+    if cmd == "/skills":
+        workspace = get_agent_workspace()
+        skills = list_workspace_skills(workspace)
+        skills_dir = get_workspace_skills_dir(workspace)
+        if not skills:
+            send_card(reply_id, f"当前没有可用技能。\n技能目录：`{skills_dir}`")
+            return True
+        lines = ["**可用工作区技能：**", f"技能目录：`{skills_dir}`", ""]
+        lines.extend(f"- `/{name}`" for name in skills)
+        send_card(reply_id, "\n".join(lines))
         return True
 
     if cmd.startswith("/toollog"):
@@ -382,6 +412,19 @@ def handle_command(chat_id: str, text: str, reply_id: str, sender_ids=None) -> b
             send_card(reply_id, "已请求取消 Agent Job：\n" + format_agent_job_detail(job))
         except Exception as e:
             send_card(reply_id, f"取消 Agent Job 失败：{e}")
+        return True
+
+    skill_name = parse_workspace_skill_invocation(cmd)
+    if skill_name:
+        workspace = get_agent_workspace()
+        if workspace_skill_exists(workspace, skill_name):
+            return False
+        send_card(
+            reply_id,
+            f"未找到工作区技能 `/{skill_name}`。\n"
+            f"请确认文件存在：`{get_workspace_skills_dir(workspace)}\\{skill_name}\\SKILL.md`\n"
+            "可用 `/skills` 查看已发现的技能。",
+        )
         return True
 
     return False

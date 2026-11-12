@@ -161,12 +161,11 @@ def _extract_codex_cli_path_from_config() -> str | None:
     config_candidates = [
         os.environ.get("CODEX_HOME", ""),
         os.path.join(os.path.dirname(get_agent_workspace()), "Codex", "Config"),
-        r"D:\Workspace\AI\Codex\Config",
         os.path.join(os.path.expanduser("~"), ".codex"),
     ]
     binary_candidates = [
         os.environ.get("CODEX_CLI_PATH", ""),
-        r"D:\Workspace\AI\Codex\Config\.sandbox-bin\codex.exe",
+        *(os.path.join(config_dir, ".sandbox-bin", "codex.exe") for config_dir in config_candidates if config_dir),
     ]
     for candidate in binary_candidates:
         if candidate and os.path.exists(candidate):
@@ -233,6 +232,84 @@ def build_agent_command(agent: str, cwd: str, prompt: str, conversation_id: str 
     return [binary, *args, prompt]
 
 
+def _claude_project_name(path: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "-", str(path or "").strip())
+
+
+def _claude_project_dirs(cwd: str) -> list[str]:
+    root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    if not os.path.isdir(root):
+        return []
+
+    values = []
+    for value in [cwd, os.path.abspath(cwd or "")]:
+        value = str(value or "").strip()
+        if value and value not in values:
+            values.append(value)
+        if len(value) >= 2 and value[1] == ":":
+            variants = [value[:1].lower() + value[1:], value[:1].upper() + value[1:]]
+            for variant in variants:
+                if variant not in values:
+                    values.append(variant)
+
+    dirs = []
+    for value in values:
+        project = _claude_project_name(value)
+        path = os.path.join(root, project)
+        if project and os.path.isdir(path) and path not in dirs:
+            dirs.append(path)
+    return dirs
+
+
+def _read_claude_session_id(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(20):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                session_id = str(item.get("sessionId") or item.get("session_id") or "").strip()
+                if session_id:
+                    return session_id
+    except OSError:
+        pass
+
+    name = os.path.splitext(os.path.basename(path))[0]
+    return name if re.fullmatch(r"[0-9a-fA-F-]{32,36}", name or "") else ""
+
+
+def detect_claude_session_id(job: dict) -> str:
+    if str(job.get("agent") or "").lower() != "claude":
+        return ""
+    if str(job.get("conversation_id") or "").strip():
+        return str(job.get("conversation_id")).strip()
+
+    started_at = int(job.get("started_at") or job.get("created_at") or 0)
+    min_mtime = max(0, started_at - 120)
+    candidates = []
+    for project_dir in _claude_project_dirs(str(job.get("cwd") or "")):
+        try:
+            for name in os.listdir(project_dir):
+                if not name.endswith(".jsonl"):
+                    continue
+                path = os.path.join(project_dir, name)
+                mtime = os.path.getmtime(path)
+                if mtime >= min_mtime:
+                    candidates.append((mtime, path))
+        except OSError:
+            continue
+
+    for _, path in sorted(candidates, reverse=True):
+        session_id = _read_claude_session_id(path)
+        if session_id:
+            return session_id
+    return ""
+
+
 def _command_preview(command: list[str]) -> str:
     if not command:
         return ""
@@ -244,7 +321,7 @@ def _running_job_count() -> int:
     return sum(1 for job in state.agent_jobs.values() if job.get("status") in ACTIVE_STATUSES)
 
 
-def create_agent_job(agent: str, prompt: str, cwd: str | None, reply_id: str, chat_id: str | None, send_reply, conversation_id: str | None = None) -> dict:
+def create_agent_job(agent: str, prompt: str, cwd: str | None, reply_id: str, chat_id: str | None, send_reply, conversation_id: str | None = None, capture_result: bool = False) -> dict:
     if not AGENT_RUNNER_ENABLED:
         raise RuntimeError("Agent Runner 未启用")
     normalized_agent = _normalize_agent(agent)
@@ -262,6 +339,9 @@ def create_agent_job(agent: str, prompt: str, cwd: str | None, reply_id: str, ch
             raise RuntimeError(f"运行中 Agent Job 已达到并发上限: {max_concurrent}")
         job_id = new_agent_job_id(normalized_agent)
         log_path = os.path.join(get_agent_job_logs_dir(), f"{job_id}.log")
+        result_path = os.path.join(get_agent_job_logs_dir(), f"{job_id}.result.txt") if capture_result and normalized_agent == "codex" else ""
+        if result_path:
+            command = [*command[:-1], "--output-last-message", result_path, command[-1]]
         now = int(time.time())
         job = {
             "job_id": job_id,
@@ -274,6 +354,7 @@ def create_agent_job(agent: str, prompt: str, cwd: str | None, reply_id: str, ch
             "reply_id": reply_id,
             "chat_id": chat_id,
             "log_path": log_path,
+            "result_path": result_path,
             "command_preview": _command_preview(command),
             "created_at": now,
             "started_at": None,
@@ -326,7 +407,7 @@ def _run_agent_job(job_id: str, command: list[str], send_reply):
         with open(job["log_path"], "a", encoding="utf-8", newline="\n") as log_file:
             log_file.write(f"[AGENT_RUNNER] start job={job_id} cwd={job['cwd']}\n")
             log_file.write(f"[AGENT_RUNNER] command={job['command_preview']}\n\n")
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            creationflags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
             process = subprocess.Popen(
                 command,
                 cwd=job["cwd"],
@@ -349,11 +430,19 @@ def _run_agent_job(job_id: str, command: list[str], send_reply):
                 with state.agent_jobs_lock:
                     current = state.agent_jobs.get(job_id, {})
                     status = "cancelled" if current.get("status") == "cancel_requested" else ("succeeded" if exit_code == 0 else "failed")
-                job = _set_job_fields(job_id, status=status, exit_code=exit_code, ended_at=int(time.time())) or job
+                fields = {"status": status, "exit_code": exit_code, "ended_at": int(time.time())}
+                session_id = detect_claude_session_id({**job, **fields})
+                if session_id:
+                    fields["conversation_id"] = session_id
+                job = _set_job_fields(job_id, **fields) or job
             except subprocess.TimeoutExpired:
                 _terminate_process_tree(process, force=True)
                 exit_code = process.wait()
-                job = _set_job_fields(job_id, status="timed_out", exit_code=exit_code, ended_at=int(time.time()), error=f"执行超时（>{timeout_seconds}s）") or job
+                fields = {"status": "timed_out", "exit_code": exit_code, "ended_at": int(time.time()), "error": f"执行超时（>{timeout_seconds}s）"}
+                session_id = detect_claude_session_id({**job, **fields})
+                if session_id:
+                    fields["conversation_id"] = session_id
+                job = _set_job_fields(job_id, **fields) or job
             log_file.write(f"\n[AGENT_RUNNER] end job={job_id} status={job.get('status')} exit_code={job.get('exit_code')}\n")
     except Exception as e:
         job = _set_job_fields(job_id, status="failed", ended_at=int(time.time()), error=str(e)) or {"job_id": job_id, "reply_id": "", "status": "failed", "error": str(e)}
@@ -461,9 +550,19 @@ def format_agent_job_completion(job: dict) -> str:
     ]
     if job.get("error"):
         lines.append(f"错误：{job['error']}")
+    result_path = job.get("result_path")
+    if result_path and os.path.isfile(result_path):
+        with open(result_path, "r", encoding="utf-8", errors="replace") as f:
+            result = f.read().strip()
+        if result:
+            return "\n".join(lines + ["", result])
     try:
         tail = tail_agent_job_log(job["job_id"], 40)
         if tail:
+            if job.get("result_path") and "already has an active writer" in tail:
+                return ("Codex 会话正在被桌面或其他进程占用，本次 CLI 续聊未执行。"
+                        "请等原会话释放后再在此话题重试。\n"
+                        f"会话：{job.get('conversation_id')}\n任务：{job.get('job_id')}")
             lines.extend(["", "最近日志：", tail[-3000:]])
     except Exception:
         pass

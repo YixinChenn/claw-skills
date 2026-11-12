@@ -11,12 +11,8 @@ class AppSettings:
     openai_base_url: str = ""
     openai_model: str = "gpt-5"
     openai_timeout: int = 600
+    heartbeat_model: str = ""
     agents_path: str = ""
-    feishu_cli_enabled: bool = False
-    feishu_cli_bin: str = "lark-cli"
-    feishu_cli_as: str = ""
-    feishu_cli_timeout: int = 120
-    feishu_cli_extra_args: list[str] = field(default_factory=list)
     doc_import_enabled: bool = False
     doc_import_dir: str = ""
     doc_import_poll_seconds: int = 10

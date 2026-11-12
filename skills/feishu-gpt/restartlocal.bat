@@ -10,6 +10,9 @@ echo.
 
 cd /d "%~dp0"
 
+rem Prefer the installed Python launcher over the WindowsApps alias.
+if exist "%LocalAppData%\Python\bin\python.exe" set "PATH=%LocalAppData%\Python\bin;%PATH%"
+
 for /f "usebackq delims=" %%i in (`python -c "import os; from app_config import settings; workspace = settings.agents_path if getattr(settings, 'agents_path', '') and os.path.isdir(settings.agents_path) else os.path.dirname(os.path.abspath(r'%~dp0bot.py')); print(os.path.join(workspace, 'runtime_data', 'bot.pid'))" 2^>nul`) do set PID_FILE=%%i
 if not defined PID_FILE set PID_FILE=%~dp0runtime_data\bot.pid
 

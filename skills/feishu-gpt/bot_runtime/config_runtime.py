@@ -14,14 +14,10 @@ NOTIFY_OPEN_ID = settings.notify_open_id
 OPENAI_API_KEY = settings.openai_api_key
 OPENAI_BASE_URL = settings.openai_base_url
 OPENAI_MODEL = settings.openai_model
+HEARTBEAT_MODEL = settings.heartbeat_model
 OPENAI_TIMEOUT = settings.openai_timeout
 AGENTS_PATH = settings.agents_path
 
-FEISHU_CLI_ENABLED = settings.feishu_cli_enabled
-FEISHU_CLI_BIN = settings.feishu_cli_bin
-FEISHU_CLI_AS = settings.feishu_cli_as
-FEISHU_CLI_TIMEOUT = settings.feishu_cli_timeout
-FEISHU_CLI_EXTRA_ARGS = [str(item) for item in settings.feishu_cli_extra_args if str(item).strip()]
 
 DOC_IMPORT_ENABLED = settings.doc_import_enabled
 DOC_IMPORT_DIR = settings.doc_import_dir

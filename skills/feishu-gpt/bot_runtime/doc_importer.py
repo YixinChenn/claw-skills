@@ -27,7 +27,7 @@ from .config_runtime import (
 )
 from .messaging import send_card_to_chat, send_card_to_open_id
 from .paths import get_agent_workspace
-from .tools import run_feishu_cli
+from .skill_tasks import run_lark_skill_task
 
 
 def get_doc_import_dir() -> str:
@@ -243,21 +243,12 @@ def _sync_online_document_index(markdown: str):
     markdown = re.sub(r"^\ufeff?\s*#\s+.+?(?:\r?\n){2,}", "", str(markdown or ""), count=1)
     temp_path = ""
     try:
-        temp_path, temp_relpath = _create_temp_markdown_file(markdown)
-        args = ["docs", "+update"]
-        if DOC_IMPORT_CLI_AS:
-            args.extend(["--as", DOC_IMPORT_CLI_AS])
-        args.extend([
-            "--doc",
-            doc_ref,
-            "--mode",
-            "overwrite",
-            "--new-title",
-            "菇菇GPT 文档汇总",
-            "--markdown",
-            f"@{temp_relpath}",
-        ])
-        run_feishu_cli(args)
+        temp_path, _ = _create_temp_markdown_file(markdown)
+        run_lark_skill_task(
+            "按给定 Markdown 完整覆盖在线文档索引并设置标题；只操作指定在线索引。",
+            {"doc_ref": doc_ref, "title": "菇菇GPT 文档汇总", "markdown_path": temp_path, "identity": DOC_IMPORT_CLI_AS or "user"},
+            ("lark-doc",),
+        )
     finally:
         if temp_path:
             try:
@@ -288,13 +279,9 @@ def _inspect_doc_title(doc_ref: str) -> str:
     ref = str(doc_ref or "").strip()
     if not ref:
         return ""
-    args = ["drive", "+inspect", "--as", "bot", "--url", ref]
     try:
-        payload = json.loads(run_feishu_cli(args))
-        stdout_data = _parse_json_object(payload.get("stdout", ""))
-        data = stdout_data.get("data") if isinstance(stdout_data, dict) else {}
-        if isinstance(data, dict):
-            return str(data.get("title") or "").strip()
+        result = run_lark_skill_task("读取指定文档的真实标题，不修改文档。", {"doc_ref": ref, "identity": "bot"}, ("lark-drive",), ("title",))
+        return result["title"]
     except Exception as e:
         print(f"[DOC_IMPORT] 获取文档标题失败: {e}")
     return ""
@@ -403,15 +390,6 @@ def _create_temp_markdown_file(markdown: str) -> tuple[str, str]:
     return temp_path, os.path.relpath(temp_path, os.getcwd())
 
 
-def _create_temp_json_file(data: dict) -> tuple[str, str]:
-    temp_dir = os.path.join(os.getcwd(), ".doc_import_tmp")
-    os.makedirs(temp_dir, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", suffix=".json", dir=temp_dir, delete=False) as f:
-        json.dump(data, f, ensure_ascii=False)
-        temp_path = f.name
-    return temp_path, os.path.relpath(temp_path, os.getcwd())
-
-
 def _extract_title(path: str, markdown: str) -> tuple[str, str]:
     lines = markdown.splitlines()
     for index, line in enumerate(lines[:20]):
@@ -423,296 +401,47 @@ def _extract_title(path: str, markdown: str) -> tuple[str, str]:
     return os.path.splitext(os.path.basename(path))[0], markdown
 
 
-def _append_target_args(args: list[str]):
-    if DOC_IMPORT_WIKI_NODE:
-        args.extend(["--wiki-node", DOC_IMPORT_WIKI_NODE])
-    elif DOC_IMPORT_WIKI_SPACE:
-        args.extend(["--wiki-space", DOC_IMPORT_WIKI_SPACE])
-    elif DOC_IMPORT_FOLDER_TOKEN:
-        args.extend(["--folder-token", DOC_IMPORT_FOLDER_TOKEN])
-
-
-def _extract_doc_token(result: dict) -> str:
-    for key in ("doc_id", "doc_url"):
-        token = _doc_ref_token(result.get(key) or "")
-        if token:
-            return token
-    return ""
-
-
-def _extract_doc_type(result: dict) -> str:
-    for key in ("doc_url", "doc_id"):
-        value = str(result.get(key) or "").lower()
-        if "/doc/" in value:
-            return "doc"
-        if "/docx/" in value:
-            return "docx"
-    return "docx"
-
-
-def _rewrite_doc_as_bot(result: dict, title: str, body: str) -> str:
-    doc_ref = str(result.get("doc_url") or result.get("doc_id") or "").strip()
-    if not doc_ref:
-        return "missing doc ref"
-
-    temp_path = ""
+def _import_document_with_skills(path: str, doc_ref: str = "") -> dict:
+    markdown = _read_markdown(path)
+    if not markdown:
+        raise ValueError("Markdown 文件为空")
+    title, body = _extract_title(path, markdown)
+    temp_path, _ = _create_temp_markdown_file(body)
     try:
-        temp_path, temp_relpath = _create_temp_markdown_file(body)
-        args = [
-            "docs",
-            "+update",
-            "--as",
-            "bot",
-            "--doc",
-            doc_ref,
-            "--mode",
-            "overwrite",
-            "--new-title",
-            title,
-            "--markdown",
-            f"@{temp_relpath}",
-        ]
-        run_feishu_cli(args)
-        return "ok"
-    except Exception as e:
-        warning = str(e)
-        print(f"[DOC_IMPORT] 机器人身份重写文档失败: {warning}")
-        return warning
+        task = (
+            "原样导入给定 Markdown 正文，标题单独设置。doc_ref 非空时覆盖更新该文档，禁止创建副本；为空时创建一次。"
+            "创建和更新默认使用 identity；bot_author_enabled 为真时，新建须由机器人创建并填充正文，"
+            "转移给当前登录用户并保留机器人 full_access，然后迁移到用户个人空间；"
+            "若指定目标位置则尊重指定位置，不再迁移个人空间。更新时仅在 bot_author_enabled 为真时让机器人参与协作编辑。"
+            "目标位置优先 wiki_node，其次 wiki_space，最后 folder_token。"
+            "返回实际 doc_id、doc_url，以及 bot_author、owner_transfer、personal_space_move、bot_permission 的实际状态；"
+            "未配置的后续步骤标记为 not_requested，不要伪报成功。"
+        )
+        skills = ("lark-doc", "lark-drive")
+        if DOC_IMPORT_WIKI_NODE or DOC_IMPORT_WIKI_SPACE:
+            skills += ("lark-wiki",)
+        result = run_lark_skill_task(task, {
+            "doc_ref": doc_ref, "title": title, "markdown_path": temp_path,
+            "identity": DOC_IMPORT_CLI_AS or "user", "bot_author_enabled": DOC_IMPORT_BOT_AUTHOR_ENABLED,
+            "bot_app_id": APP_ID, "wiki_node": DOC_IMPORT_WIKI_NODE,
+            "wiki_space": DOC_IMPORT_WIKI_SPACE, "folder_token": DOC_IMPORT_FOLDER_TOKEN,
+        }, skills, ("doc_id", "doc_url"))
     finally:
-        if temp_path:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-
-
-def _grant_bot_full_access(result: dict, as_identity: str = "user") -> str:
-    if not DOC_IMPORT_BOT_AUTHOR_ENABLED:
-        return "disabled"
-    if not APP_ID:
-        return "missing APP_ID"
-    token = _extract_doc_token(result)
-    if not token:
-        return "missing doc token"
-
-    params = {
-        "token": token,
-        "type": _extract_doc_type(result),
-        "need_notification": False,
-    }
-    data = {
-        "member_type": "appid",
-        "member_id": APP_ID,
-        "perm": "full_access",
-    }
-    params_path = ""
-    data_path = ""
-    try:
-        params_path, params_relpath = _create_temp_json_file(params)
-        data_path, data_relpath = _create_temp_json_file(data)
-        args = ["drive", "permission.members", "create"]
-        if as_identity:
-            args.extend(["--as", as_identity])
-        args.extend([
-            "--params",
-            f"@{params_relpath}",
-            "--data",
-            f"@{data_relpath}",
-            "--yes",
-        ])
-        run_feishu_cli(args)
-        return "ok"
-    except Exception as e:
-        warning = str(e)
-        print(f"[DOC_IMPORT] 加入机器人协作者失败: {warning}")
-        return warning
-    finally:
-        for path in (params_path, data_path):
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-
-
-def _ensure_bot_author(result: dict, title: str, body: str) -> str:
-    permission_status = _grant_bot_full_access(result, DOC_IMPORT_CLI_AS or "user")
-    rewrite_status = _rewrite_doc_as_bot(result, title, body)
-    if rewrite_status == "ok":
-        return "ok" if permission_status == "ok" else f"bot edit ok; permission warning: {permission_status}"
-    return f"permission: {permission_status}; bot edit: {rewrite_status}"
-
-
-def _transfer_owner_to_user(result: dict, user_open_id: str) -> str:
-    user_id = str(user_open_id or "").strip()
-    if not user_id:
-        return "missing user open_id"
-    token = _extract_doc_token(result)
-    if not token:
-        return "missing doc token"
-
-    params = {
-        "token": token,
-        "type": _extract_doc_type(result),
-        "need_notification": False,
-        "remove_old_owner": False,
-        "old_owner_perm": "full_access",
-        "stay_put": True,
-    }
-    data = {
-        "member_type": "openid",
-        "member_id": user_id,
-    }
-    params_path = ""
-    data_path = ""
-    try:
-        params_path, params_relpath = _create_temp_json_file(params)
-        data_path, data_relpath = _create_temp_json_file(data)
-        args = [
-            "drive",
-            "permission.members",
-            "transfer_owner",
-            "--as",
-            "bot",
-            "--params",
-            f"@{params_relpath}",
-            "--data",
-            f"@{data_relpath}",
-            "--yes",
-        ]
-        run_feishu_cli(args)
-        return "ok"
-    except Exception as e:
-        warning = str(e)
-        print(f"[DOC_IMPORT] 转移文档所有者给用户失败: {warning}")
-        return warning
-    finally:
-        for path in (params_path, data_path):
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-
-
-def _parse_json_object(text: str) -> dict:
-    raw = str(text or "").strip()
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
         try:
-            return json.loads(raw[start:end + 1])
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
-def _find_value(data, keys: set[str]) -> str:
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if key in keys and isinstance(value, str) and value.strip():
-                return value.strip()
-        for value in data.values():
-            found = _find_value(value, keys)
-            if found:
-                return found
-    elif isinstance(data, list):
-        for item in data:
-            found = _find_value(item, keys)
-            if found:
-                return found
-    return ""
+            os.remove(temp_path)
+        except OSError:
+            pass
+    result.update(action="updated" if doc_ref else "created", title=title)
+    _remember_doc(title, result)
+    return result
 
 
 def create_lark_doc_from_markdown(path: str) -> dict:
-    markdown = _read_markdown(path)
-    if not markdown:
-        raise ValueError("Markdown 文件为空")
-    title, body = _extract_title(path, markdown)
-
-    temp_path = ""
-    try:
-        temp_path, temp_relpath = _create_temp_markdown_file(body)
-
-        args = ["docs", "+create"]
-        create_as = "bot" if DOC_IMPORT_BOT_AUTHOR_ENABLED else DOC_IMPORT_CLI_AS
-        if create_as:
-            args.extend(["--as", create_as])
-        args.extend(["--title", title, "--markdown", f"@{temp_relpath}"])
-        _append_target_args(args)
-
-        payload = json.loads(run_feishu_cli(args))
-    finally:
-        if temp_path:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-    stdout_data = _parse_json_object(payload.get("stdout", ""))
-    doc_url = _find_value(stdout_data, {"doc_url", "url"})
-    doc_id = _find_value(stdout_data, {"doc_id", "document_id", "token"})
-    result = {
-        "action": "created",
-        "title": title,
-        "doc_url": doc_url,
-        "doc_id": doc_id,
-        "stdout": payload.get("stdout", ""),
-    }
-    if DOC_IMPORT_BOT_AUTHOR_ENABLED:
-        user_open_id = _find_value(stdout_data, {"user_open_id"})
-        result["bot_author"] = "created_as_bot"
-        result["owner_transfer"] = _transfer_owner_to_user(result, user_open_id)
-        result["personal_space_move"] = "pending_ai_migration"
-        result["bot_permission"] = _grant_bot_full_access(result, "user")
-    else:
-        result["bot_author"] = "disabled"
-    _remember_doc(title, result)
-    return result
+    return _import_document_with_skills(path)
 
 
 def update_lark_doc_from_markdown(path: str, doc_ref: str) -> dict:
-    markdown = _read_markdown(path)
-    if not markdown:
-        raise ValueError("Markdown 文件为空")
-    title, body = _extract_title(path, markdown)
-
-    temp_path = ""
-    try:
-        temp_path, temp_relpath = _create_temp_markdown_file(body)
-
-        args = ["docs", "+update"]
-        if DOC_IMPORT_CLI_AS:
-            args.extend(["--as", DOC_IMPORT_CLI_AS])
-        args.extend(["--doc", doc_ref, "--mode", "overwrite", "--new-title", title, "--markdown", f"@{temp_relpath}"])
-
-        payload = json.loads(run_feishu_cli(args))
-    finally:
-        if temp_path:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-
-    stdout_data = _parse_json_object(payload.get("stdout", ""))
-    existing = _existing_doc_entry(title)
-    doc_url = _find_value(stdout_data, {"doc_url", "url"}) or existing.get("doc_url", "")
-    doc_id = _find_value(stdout_data, {"doc_id", "document_id", "token"}) or doc_ref
-    result = {
-        "action": "updated",
-        "title": title,
-        "doc_url": doc_url,
-        "doc_id": doc_id,
-        "stdout": payload.get("stdout", ""),
-    }
-    result["bot_author"] = _ensure_bot_author(result, title, body)
-    _remember_doc(title, result)
-    return result
+    return _import_document_with_skills(path, doc_ref)
 
 
 def import_lark_doc_from_markdown(path: str) -> dict:
